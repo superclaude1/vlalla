@@ -173,7 +173,7 @@ class CharacterChatServiceIntegrationTest {
         )
         dao.insertBook(BookEntity("book", "索引测试", "test.txt", 1, 3, 300))
         repeat(2) {
-            repository.saveAnalysisDelta("book", 3, listOf(character), listOf(relation), listOf(plot))
+            repository.saveAnalysisDelta("book", 3, emptyList(), listOf(character), listOf(relation), listOf(plot))
         }
 
         val automaticMemories = dao.getMemories("book")

@@ -18,7 +18,7 @@ class TtsDirectingService(
     private val settings: LlmSettingsStore,
     private val client: OpenAiCompatibleClient = OpenAiCompatibleClient()
 ) {
-    suspend fun direct(blocks: List<ReadingBlock>, onProgress: (Int, Int) -> Unit = { _, _ -> }): List<DirectedBlock> {
+    suspend fun direct(blocks: List<ReadingBlock>, onProgress: suspend (Int, Int) -> Unit = { _, _ -> }): List<DirectedBlock> {
         if (blocks.isEmpty()) return emptyList()
         val config = settings.config.first()
         if (config.model.isBlank() || settings.readApiKey().isBlank()) return localAll(blocks)
@@ -26,8 +26,8 @@ class TtsDirectingService(
         val batches = blocks.indices.chunked(BATCH_SIZE)
         batches.forEachIndexed { batchIndex, indices ->
             val byId = indices.associate { it.toString() to blocks[it] }
-            val parsed = runCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId) }
-                .recoverCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId, repair = true) }
+            val parsed = runCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId, config.allowInsecureHttp) }
+                .recoverCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId, config.allowInsecureHttp, repair = true) }
                 .getOrNull()
             indices.forEach { index ->
                 output += DirectedBlock(
@@ -41,11 +41,12 @@ class TtsDirectingService(
         return output.sortedBy { it.segmentId.toIntOrNull() ?: Int.MAX_VALUE }
     }
 
-    private fun requestBatch(
+    private suspend fun requestBatch(
         baseUrl: String,
         apiKey: String,
         model: String,
         blocks: Map<String, ReadingBlock>,
+        allowInsecureHttp: Boolean,
         repair: Boolean = false
     ): Map<String, TtsDirectives> {
         val input = JSONArray().apply {
@@ -68,7 +69,8 @@ class TtsDirectingService(
             baseUrl, apiKey, model,
             listOf(LlmMessage("system", system), LlmMessage("user", user)),
             temperature = 0.15,
-            jsonMode = true
+            jsonMode = true,
+            allowInsecureHttp = allowInsecureHttp
         )
         val start = raw.indexOf('{')
         val end = raw.lastIndexOf('}')

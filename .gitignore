@@ -10,3 +10,6 @@
 .cxx/
 __pycache__/
 *.pyc
+*.jks
+*.keystore
+keystore.properties

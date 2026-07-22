@@ -2,13 +2,10 @@ package com.storybrain.app.ui
 
 import android.app.Application
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.storybrain.app.StoryBrainApplication
-import com.storybrain.app.analysis.LlmStoryAnalyzer
 import com.storybrain.app.analysis.CharacterChatService
-import com.storybrain.app.data.TaskStatus
 import com.storybrain.app.data.ChatSessionEntity
 import com.storybrain.app.data.MemoryItemEntity
 import com.storybrain.app.data.MemoryType
@@ -16,8 +13,6 @@ import com.storybrain.app.data.MemoryWithSelection
 import com.storybrain.app.data.BookTtsSettingEntity
 import com.storybrain.app.data.CharacterVoiceBindingEntity
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
-import com.storybrain.app.importer.ImportedNovel
-import com.storybrain.app.importer.NovelStreamImporter
 import com.storybrain.app.export.Neo4jExporter
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.TtsSettingsStore
@@ -25,17 +20,13 @@ import com.storybrain.app.tts.ChapterAudioPlayer
 import com.storybrain.app.tts.ChapterTtsEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-data class ImportUiState(
-    val loading: Boolean = false,
-    val sourceName: String = "",
-    val title: String = "",
-    val novel: ImportedNovel? = null,
-    val error: String? = null
-)
 
 data class AnalysisUiState(
     val bookId: String? = null,
@@ -79,13 +70,11 @@ data class MemoryActionUiState(val running: Boolean = false, val message: String
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as StoryBrainApplication).repository
-    private val analyzer = LlmStoryAnalyzer(repository, LlmSettingsStore(application))
     private val characterChat = CharacterChatService(repository, LlmSettingsStore(application))
     private val ttsSettings = TtsSettingsStore(application)
     private val ttsEngine = ChapterTtsEngine(application, repository, ttsSettings)
+    private val longTasks = (application as StoryBrainApplication).longTaskScheduler
     private val audioPlayer = ChapterAudioPlayer()
-    private val _importState = MutableStateFlow(ImportUiState())
-    val importState = _importState.asStateFlow()
     private val _analysisState = MutableStateFlow(AnalysisUiState())
     val analysisState = _analysisState.asStateFlow()
     private val _characterChatState = MutableStateFlow(CharacterChatUiState())
@@ -99,16 +88,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _memoryActionState = MutableStateFlow(MemoryActionUiState())
     val memoryActionState = _memoryActionState.asStateFlow()
     private val memoryPreferences = application.getSharedPreferences("memory_library_v3", Application.MODE_PRIVATE)
+    private val bookDetailStates = mutableMapOf<String, StateFlow<BookDetailUiState>>()
+    private val readerStates = mutableMapOf<String, StateFlow<ReaderUiState>>()
+    private val storyBrainStates = mutableMapOf<String, StateFlow<StoryBrainUiState>>()
+    private val memoryCenterStates = mutableMapOf<String, StateFlow<MemoryCenterUiState>>()
 
-    init {
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.ensureDefaultTtsProfiles()
-            runCatching { ttsEngine.recoverAndCleanup(repository.getAllChapterIds().toSet()) }
-            repository.getBooks().forEach { book -> runCatching { repository.backfillAnalysisMemories(book.id) } }
-        }
-    }
-
-    val books = repository.observeBooks()
     fun book(bookId: String) = repository.observeBook(bookId)
     fun chapters(bookId: String) = repository.observeChapters(bookId)
     fun chapter(chapterId: String) = repository.observeChapter(chapterId)
@@ -124,6 +108,68 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun ttsVoicePool(profileId: String) = repository.observeTtsVoicePool(profileId)
     fun bookTtsSetting(bookId: String) = repository.observeBookTtsSetting(bookId)
     fun activeVoiceBindings(bookId: String) = repository.observeActiveCharacterVoiceBindings(bookId)
+
+    fun bookDetail(bookId: String): StateFlow<BookDetailUiState> = synchronized(bookDetailStates) {
+        bookDetailStates.getOrPut(bookId) {
+            combine(
+                repository.observeBook(bookId),
+                repository.observeChapters(bookId),
+                repository.observeTtsProfiles(),
+                ttsSettings.config,
+                repository.observeBookTtsSetting(bookId)
+            ) { book, chapters, profiles, global, setting ->
+                BookDetailUiState(book, chapters, profiles, global, setting)
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BookDetailUiState())
+        }
+    }
+
+    fun readerDetail(bookId: String, chapterId: String): StateFlow<ReaderUiState> = synchronized(readerStates) {
+        readerStates.getOrPut("$bookId:$chapterId") {
+            combine(
+                repository.observeChapter(chapterId),
+                repository.observeChapters(bookId),
+                repository.observeCharacters(bookId)
+            ) { chapter, chapters, characters -> ReaderUiState(chapter, chapters, characters) }
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReaderUiState())
+        }
+    }
+
+    fun storyBrainDetail(bookId: String): StateFlow<StoryBrainUiState> = synchronized(storyBrainStates) {
+        storyBrainStates.getOrPut(bookId) {
+            val core = combine(
+                repository.observeCharacters(bookId),
+                repository.observeRelations(bookId),
+                repository.observePlotNodes(bookId),
+                repository.observeMemoryCount(bookId)
+            ) { characters, relations, nodes, count -> StoryBrainCore(characters, relations, nodes, count) }
+            val tts = combine(
+                ttsSettings.config,
+                repository.observeTtsProfiles(),
+                repository.observeBookTtsSetting(bookId),
+                repository.observeActiveCharacterVoiceBindings(bookId)
+            ) { config, profiles, setting, bindings -> StoryBrainTts(config, profiles, setting, bindings) }
+            val pools = combine(
+                repository.observeTtsVoicePool(com.storybrain.app.data.TtsProfileIds.EDGE),
+                repository.observeTtsVoicePool(com.storybrain.app.data.TtsProfileIds.FISH),
+                repository.observeTtsVoicePool(com.storybrain.app.data.TtsProfileIds.OPENAI)
+            ) { edge, fish, compatible -> StoryBrainVoicePools(edge, fish, compatible) }
+            combine(core, tts, pools) { brain, audio, voices ->
+                StoryBrainUiState(
+                    brain.characters, brain.relations, brain.nodes, brain.memoryCount,
+                    audio.config, audio.profiles, audio.bookSetting, audio.bindings,
+                    voices.edge, voices.fish, voices.compatible
+                )
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StoryBrainUiState())
+        }
+    }
+
+    fun memoryCenterDetail(bookId: String): StateFlow<MemoryCenterUiState> = synchronized(memoryCenterStates) {
+        memoryCenterStates.getOrPut(bookId) {
+            combine(repository.observeMemories(bookId), repository.observeCharacters(bookId)) { memories, characters ->
+                MemoryCenterUiState(memories, characters)
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MemoryCenterUiState())
+        }
+    }
 
     fun setBookPrimaryProfile(bookId: String, profileId: String?) {
         viewModelScope.launch { repository.setBookPrimaryProfile(bookId, profileId) }
@@ -150,85 +196,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateCharacterVoice(characterId, voiceId) }
     }
 
-    fun loadNovel(uri: Uri) {
-        viewModelScope.launch {
-            _importState.value = ImportUiState(loading = true)
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val resolver = getApplication<Application>().contentResolver
-                    val sourceName = resolver.query(uri, null, null, null, null)?.use { cursor ->
-                        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (cursor.moveToFirst() && index >= 0) cursor.getString(index) else null
-                    } ?: "导入小说.txt"
-                    val title = sourceName.substringBeforeLast('.').ifBlank { "未命名小说" }
-                    val novel = resolver.openInputStream(uri)?.use { input ->
-                        NovelStreamImporter.parse(input, title)
-                    } ?: error("无法读取该文件")
-                    require(novel.chapters.isNotEmpty()) { "文件中没有可读取的正文" }
-                    ImportUiState(
-                        sourceName = sourceName,
-                        title = title,
-                        novel = novel
-                    )
-                }
-            }.onSuccess { _importState.value = it }
-                .onFailure { _importState.value = ImportUiState(error = it.message ?: "导入失败") }
-        }
-    }
-
-    fun updateImportTitle(title: String) {
-        _importState.value = _importState.value.copy(title = title)
-    }
-
-    fun confirmImport(onComplete: (String) -> Unit) {
-        val state = _importState.value
-        val novel = state.novel ?: return
-        viewModelScope.launch {
-            _importState.value = state.copy(loading = true)
-            runCatching { repository.saveImportedNovel(novel, state.sourceName, state.title) }
-                .onSuccess { id ->
-                    _importState.value = ImportUiState()
-                    onComplete(id)
-                }
-                .onFailure { _importState.value = state.copy(loading = false, error = it.message) }
-        }
-    }
-
-    fun cancelImport() { _importState.value = ImportUiState() }
-
     fun markReading(bookId: String, chapterIndex: Int) {
         viewModelScope.launch { repository.updateReadingProgress(bookId, chapterIndex) }
     }
 
     fun generateChapterTts(bookId: String, chapterId: String) {
-        if (_ttsState.value.running) return
         viewModelScope.launch {
             audioPlayer.stop()
-            repository.updateTtsStatus(chapterId, TaskStatus.QUEUED)
-            _ttsState.value = TtsUiState(chapterId = chapterId, running = true, progress = "准备章节文本…")
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    ttsEngine.generate(
-                        bookId,
-                        chapterId,
-                        onProgress = { completed, total ->
-                            _ttsState.value = _ttsState.value.copy(progress = "正在生成 $completed/$total 段")
-                        },
-                        onStage = { stage -> _ttsState.value = _ttsState.value.copy(progress = stage) }
-                    )
-                }
-            }.onSuccess { result ->
-                _ttsState.value = TtsUiState(
-                    chapterId = chapterId,
-                    message = "本章配音已生成（${result.segmentCount} 段）"
-                )
-            }.onFailure { error ->
+            runCatching { longTasks.enqueueTts(bookId, chapterId) }
+                .onSuccess {
+                    _ttsState.value = TtsUiState(chapterId = chapterId, message = "配音任务已加入后台队列")
+                }.onFailure { error ->
                 _ttsState.value = TtsUiState(
                     chapterId = chapterId,
                     message = error.message ?: "章节配音失败",
                     isError = true
                 )
-            }
+                }
+        }
+    }
+
+    fun cancelChapterTts(chapterId: String) {
+        viewModelScope.launch {
+            longTasks.cancelTts(chapterId)
+            _ttsState.value = TtsUiState(chapterId = chapterId, message = "已取消配音任务")
         }
     }
 
@@ -249,12 +240,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun analyzeBook(bookId: String, chapterCount: Int? = null) {
-        if (_analysisState.value.running) return
         viewModelScope.launch {
-            _analysisState.value = AnalysisUiState(bookId = bookId, running = true, message = "正在调用 LLM 分析…")
-            runCatching { withContext(Dispatchers.IO) { analyzer.analyzeNext(bookId, chapterCount) } }
-                .onSuccess { result ->
-                    _analysisState.value = AnalysisUiState(bookId = bookId, message = result.message)
+            runCatching { longTasks.enqueueAnalysis(bookId, chapterCount) }
+                .onSuccess { queued ->
+                    _analysisState.value = AnalysisUiState(
+                        bookId = bookId,
+                        message = if (queued) "分析任务已加入后台队列" else "全书已经分析完成"
+                    )
                 }
                 .onFailure { error ->
                     _analysisState.value = AnalysisUiState(
@@ -266,11 +258,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun cancelAnalysis(bookId: String) {
+        viewModelScope.launch {
+            longTasks.cancelAnalysis(bookId)
+            _analysisState.value = AnalysisUiState(bookId = bookId, message = "已取消分析任务")
+        }
+    }
+
     fun deleteBook(bookId: String, onComplete: () -> Unit = {}, onError: (String) -> Unit = {}) {
         viewModelScope.launch {
             runCatching {
                 val chapterIds = repository.getChapters(bookId).map { it.id }
                 audioPlayer.stop()
+                longTasks.cancelBook(bookId, chapterIds)
                 repository.deleteBook(bookId)
                 withContext(Dispatchers.IO) { ttsEngine.deleteAudio(chapterIds) }
             }.onSuccess {

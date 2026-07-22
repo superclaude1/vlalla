@@ -8,8 +8,12 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import com.storybrain.app.network.NetworkClients
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -19,18 +23,32 @@ import okio.ByteString
 
 /** Direct Android implementation of the Microsoft Edge online TTS protocol. */
 class EdgeTtsClient {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient = NetworkClients.webSocket
 
-    fun synthesize(text: String, voice: String, output: File) {
+    suspend fun synthesize(text: String, voice: String, output: File) {
         synthesize(text, voice, TtsDirectives(), output)
     }
 
-    fun synthesize(text: String, voice: String, directives: TtsDirectives, output: File) {
+    suspend fun synthesize(text: String, voice: String, directives: TtsDirectives, output: File) {
         require(text.isNotBlank()) { "配音文本不能为空" }
+        val bytes = try {
+            withTimeout(45_000L) { requestAudio(text, voice, directives) }
+        } catch (timeout: TimeoutCancellationException) {
+            throw EdgeTtsException("Edge TTS 请求超时，请检查网络后重试")
+        }
+        if (bytes.isEmpty()) throw EdgeTtsException("Edge TTS 未返回有效音频")
+        output.parentFile?.mkdirs()
+        val temporary = File(output.parentFile, "${output.name}.part")
+        temporary.writeBytes(bytes)
+        if (output.exists()) output.delete()
+        if (!temporary.renameTo(output)) {
+            temporary.delete()
+            throw EdgeTtsException("无法保存配音文件")
+        }
+    }
+
+    private suspend fun requestAudio(text: String, voice: String, directives: TtsDirectives): ByteArray =
+        suspendCancellableCoroutine { continuation ->
         val requestId = connectionId()
         val url = "$WSS_URL&ConnectionId=${connectionId()}" +
             "&Sec-MS-GEC=${generateSecMsGec()}&Sec-MS-GEC-Version=$SEC_MS_GEC_VERSION"
@@ -42,9 +60,7 @@ class EdgeTtsClient {
             .header("Cache-Control", "no-cache")
             .header("Cookie", "muid=${randomMuid()};")
             .build()
-        val latch = CountDownLatch(1)
         val audio = ByteArrayOutputStream()
-        var failure: Throwable? = null
         var finished = false
 
         val socket = client.newWebSocket(request, object : WebSocketListener() {
@@ -70,7 +86,7 @@ class EdgeTtsClient {
                 if (text.contains("Path:turn.end", ignoreCase = true)) {
                     finished = true
                     webSocket.close(1000, "completed")
-                    latch.countDown()
+                    if (continuation.isActive) continuation.resume(audio.toByteArray())
                 }
             }
 
@@ -86,33 +102,20 @@ class EdgeTtsClient {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                failure = EdgeTtsException(
+                val failure = EdgeTtsException(
                     if (response != null) "Edge TTS 连接失败（HTTP ${response.code}）" else
                         (t.message ?: "Edge TTS 网络连接失败")
                 )
-                latch.countDown()
+                if (continuation.isActive) continuation.resumeWithException(failure)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                latch.countDown()
+                if (!finished && continuation.isActive) {
+                    continuation.resumeWithException(EdgeTtsException("Edge TTS 连接提前关闭"))
+                }
             }
         })
-
-        if (!latch.await(45, TimeUnit.SECONDS)) {
-            socket.cancel()
-            throw EdgeTtsException("Edge TTS 请求超时，请检查网络后重试")
-        }
-        failure?.let { throw it }
-        val bytes = audio.toByteArray()
-        if (!finished || bytes.isEmpty()) throw EdgeTtsException("Edge TTS 未返回有效音频")
-        output.parentFile?.mkdirs()
-        val temporary = File(output.parentFile, "${output.name}.part")
-        temporary.writeBytes(bytes)
-        if (output.exists()) output.delete()
-        if (!temporary.renameTo(output)) {
-            temporary.delete()
-            throw EdgeTtsException("无法保存配音文件")
-        }
+        continuation.invokeOnCancellation { socket.cancel() }
     }
 
     private fun generateSecMsGec(): String {
@@ -179,4 +182,4 @@ class EdgeTtsClient {
     }
 }
 
-class EdgeTtsException(message: String) : Exception(message)
+class EdgeTtsException(message: String) : TtsProviderException(null, true, message)

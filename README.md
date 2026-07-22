@@ -28,6 +28,7 @@
 - 配音前由 LLM 生成情绪、语气、停顿、语速和音量标注；LLM 不可用时自动采用本地规则。
 - 演绎脚本和音频按内容哈希缓存；临时目录生成成功后再原子替换旧配音，失败时保留原结果。
 - 对可重试的限流和服务端错误进行退避重试，并保留每段状态和错误信息。
+- 章节分析和配音由 WorkManager 唯一任务执行，退到后台或普通进程回收后可恢复，并支持取消和失败重试。
 
 Fish Audio 的公开可见音色不等于自动获得发布或商业使用权，请自行确认相应授权。
 
@@ -42,12 +43,14 @@ Fish Audio 的公开可见音色不等于自动获得发布或商业使用权，
 
 LLM 与 TTS API Key 使用 Android Keystore 的 AES-GCM 密钥加密，仅保存在设备本地。
 
+服务地址默认要求 HTTPS。已有或新填写的明文 HTTP 地址必须在设置中单独确认，只建议用于可信局域网；应用仍会保留任意自建局域网地址所需的系统明文传输兼容能力。
+
 ## 构建与测试
 
 环境要求：JDK 17、Android SDK 34。
 
 ```powershell
-.\gradlew.bat testDebugUnitTest assembleDebug
+.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleRelease
 ```
 
 连接 Android 设备或启动模拟器后可运行完整设备测试：
@@ -57,3 +60,12 @@ LLM 与 TTS API Key 使用 Android Keystore 的 AES-GCM 密钥加密，仅保存
 ```
 
 Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
+
+Release 默认经过 R8 与资源裁剪并生成未签名 APK。正式签名通过以下环境变量注入，签名文件和密码不得加入仓库：
+
+- `ZHANGJING_KEYSTORE`
+- `ZHANGJING_STORE_PASSWORD`
+- `ZHANGJING_KEY_ALIAS`
+- `ZHANGJING_KEY_PASSWORD`
+
+GitHub Actions 会在主分支和拉取请求上运行单元测试、Lint 及 Debug/Release 构建；设备测试在手动触发和每周计划任务中运行。

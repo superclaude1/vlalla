@@ -58,7 +58,8 @@ class CharacterChatService(
                 add(LlmMessage("system", prompt))
                 history.forEach { message -> add(LlmMessage(message.role, message.content)) }
             },
-            temperature = 0.7
+            temperature = 0.7,
+            allowInsecureHttp = config.allowInsecureHttp
         ).trim()
         require(response.isNotBlank()) { "角色没有返回内容，请重试" }
         repository.insertChatMessage(

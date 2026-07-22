@@ -16,6 +16,7 @@ class StoryRepository(private val database: AppDatabase) {
     private val dao = database.storyDao()
 
     fun observeBooks() = dao.observeBooks()
+    fun observeLibraryItems() = dao.observeLibraryItems()
     fun observeBook(bookId: String) = dao.observeBook(bookId)
     fun observeChapters(bookId: String) = dao.observeChapters(bookId)
     fun observeChapter(chapterId: String) = dao.observeChapter(chapterId)
@@ -36,6 +37,8 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun getChapter(chapterId: String) = dao.getChapter(chapterId)
     suspend fun getChapters(bookId: String) = dao.getChapters(bookId)
     suspend fun getAllChapterIds() = dao.getAllChapterIds()
+    suspend fun getActiveAnalysisTasks() = dao.getActiveAnalysisTasks()
+    suspend fun getActiveTtsTasks() = dao.getActiveTtsTasks()
     suspend fun getCharacters(bookId: String) = dao.getCharacters(bookId)
     suspend fun getPlotNodes(bookId: String) = dao.getPlotNodes(bookId)
     suspend fun getRelations(bookId: String) = dao.getRelations(bookId)
@@ -82,6 +85,9 @@ class StoryRepository(private val database: AppDatabase) {
 
     suspend fun updateTtsStatus(chapterId: String, status: TaskStatus) =
         dao.updateTtsStatus(chapterId, status.name)
+
+    suspend fun cancelTtsTask(chapterId: String) =
+        dao.cancelTtsTask(chapterId, TaskStatus.CANCELLED.name)
 
     suspend fun updateTtsResult(chapterId: String, status: TaskStatus, manifestPath: String?) =
         dao.updateTtsResult(chapterId, status.name, manifestPath)
@@ -207,9 +213,30 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun updateAnalysisStatus(chapterIds: List<String>, status: TaskStatus) =
         dao.updateAnalysisStatus(chapterIds, status.name)
 
+    suspend fun queueAnalysis(bookId: String, requestedChapterCount: Int?): List<String> {
+        val book = dao.getBook(bookId) ?: error("找不到这本小说")
+        val chapters = dao.getChapters(bookId)
+        val initializationTarget = minOf(15, chapters.size)
+        val targetCount = if (book.analysisCompleted < initializationTarget) {
+            initializationTarget - book.analysisCompleted
+        } else {
+            (requestedChapterCount ?: 1).coerceAtLeast(1)
+        }
+        return chapters.drop(book.analysisCompleted).take(targetCount).map { it.id }.also { ids ->
+            if (ids.isNotEmpty()) dao.updateAnalysisStatus(ids, TaskStatus.QUEUED.name)
+        }
+    }
+
+    suspend fun cancelAnalysisTasks(bookId: String) =
+        dao.cancelAnalysisTasks(bookId, TaskStatus.CANCELLED.name)
+
+    suspend fun failAnalysisTasks(bookId: String) =
+        dao.failAnalysisTasks(bookId, TaskStatus.FAILED.name)
+
     suspend fun saveAnalysisDelta(
         bookId: String,
         completed: Int,
+        completedChapterIds: List<String>,
         characters: List<StoryCharacterEntity>,
         relations: List<StoryRelationEntity>,
         nodes: List<PlotNodeEntity>
@@ -218,6 +245,9 @@ class StoryRepository(private val database: AppDatabase) {
         dao.insertRelations(relations)
         dao.insertPlotNodes(nodes)
         dao.updateAnalysisCompleted(bookId, completed)
+        if (completedChapterIds.isNotEmpty()) {
+            dao.updateAnalysisStatus(completedChapterIds, TaskStatus.COMPLETED.name)
+        }
         syncMemories(bookId, relations, nodes, dao.getCharacters(bookId))
     }
 

@@ -21,7 +21,11 @@ class LlmStoryAnalyzer(
     private val settings: LlmSettingsStore,
     private val client: OpenAiCompatibleClient = OpenAiCompatibleClient()
 ) {
-    suspend fun analyzeNext(bookId: String, requestedChapterCount: Int? = null): AnalysisRunResult {
+    suspend fun analyzeNext(
+        bookId: String,
+        requestedChapterCount: Int? = null,
+        onProgress: suspend (completed: Int, total: Int) -> Unit = { _, _ -> }
+    ): AnalysisRunResult {
         val config = settings.config.first()
         val apiKey = settings.readApiKey()
         require(config.model.isNotBlank()) { "请先在设置中检测并选择分析模型" }
@@ -41,6 +45,7 @@ class LlmStoryAnalyzer(
         return runCatching {
             var completed = book.analysisCompleted
             var calls = 0
+            var processed = 0
             groupByCharacterBudget(target, 24_000).forEach { batch ->
                 runningBatchIds = batch.map { it.id }
                 repository.updateAnalysisStatus(runningBatchIds, TaskStatus.RUNNING)
@@ -51,19 +56,37 @@ class LlmStoryAnalyzer(
                     LlmMessage("user", buildUserPrompt(batch, knownCharacters, knownNodes))
                 )
                 val response = try {
-                    client.chatCompletion(config.baseUrl, apiKey, config.model, messages, temperature = 0.1, jsonMode = true)
+                    client.chatCompletion(
+                        config.baseUrl, apiKey, config.model, messages,
+                        temperature = 0.1,
+                        jsonMode = true,
+                        allowInsecureHttp = config.allowInsecureHttp
+                    )
                 } catch (error: LlmConnectionException) {
                     val unsupportedJsonMode = error.statusCode == 400 &&
                         error.message.orEmpty().contains(Regex("response[_ -]?format|json", RegexOption.IGNORE_CASE))
                     if (!unsupportedJsonMode) throw error
-                    client.chatCompletion(config.baseUrl, apiKey, config.model, messages, temperature = 0.1, jsonMode = false)
+                    client.chatCompletion(
+                        config.baseUrl, apiKey, config.model, messages,
+                        temperature = 0.1,
+                        jsonMode = false,
+                        allowInsecureHttp = config.allowInsecureHttp
+                    )
                 }
                 val delta = parseDelta(bookId, response, knownCharacters, knownNodes)
                 completed = maxOf(completed, batch.maxOf { it.chapterIndex } + 1)
-                repository.saveAnalysisDelta(bookId, completed, delta.characters, delta.relations, delta.nodes)
-                repository.updateAnalysisStatus(batch.map { it.id }, TaskStatus.COMPLETED)
+                repository.saveAnalysisDelta(
+                    bookId,
+                    completed,
+                    batch.map { it.id },
+                    delta.characters,
+                    delta.relations,
+                    delta.nodes
+                )
                 runningBatchIds = emptyList()
                 calls++
+                processed += batch.size
+                onProgress(processed, target.size)
             }
             AnalysisRunResult(target.size, completed, "已完成 ${target.size} 章 LLM 分析（$calls 次请求）")
         }.getOrElse { error ->

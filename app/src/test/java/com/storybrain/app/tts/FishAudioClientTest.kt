@@ -11,6 +11,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import kotlinx.coroutines.runBlocking
 
 class FishAudioClientTest {
     private lateinit var server: MockWebServer
@@ -29,7 +30,7 @@ class FishAudioClientTest {
     }
 
     @Test
-    fun listsOnlyTrainedVoicesAndSendsSearchParameters() {
+    fun listsOnlyTrainedVoicesAndSendsSearchParameters() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             """{
               "total":2,
@@ -40,7 +41,7 @@ class FishAudioClientTest {
             }""".trimIndent()
         ))
 
-        val result = FishAudioClient(server.url("/").toString()).listVoices(
+        val result = FishAudioClient(server.url("/").toString(), allowInsecureHttp = true).listVoices(
             apiKey = "secret",
             self = false,
             query = "女声",
@@ -62,7 +63,7 @@ class FishAudioClientTest {
     }
 
     @Test
-    fun synthesizesDirectedAudioAndWritesAtomically() {
+    fun synthesizesDirectedAudioAndWritesAtomically() = runBlocking {
         val audio = "ID3-fish-audio".toByteArray()
         server.enqueue(
             MockResponse()
@@ -72,12 +73,13 @@ class FishAudioClientTest {
         )
         val output = File(temporaryFolder.root, "fish.mp3")
 
-        FishAudioClient(server.url("/").toString()).synthesize(
+        FishAudioClient(server.url("/").toString(), allowInsecureHttp = true).synthesize(
             TtsSynthesisRequest(
                 text = "你好",
                 voice = "fish:voice-1",
                 model = "s2.1-pro-free",
                 speed = 1.1f,
+                idempotencyKey = "segment-key",
                 directives = TtsDirectives(emotion = "happy", pauseAfterMs = 180, rate = 1.2f)
             ),
             "secret",
@@ -90,6 +92,7 @@ class FishAudioClientTest {
         assertEquals("/v1/tts", request.path)
         assertEquals("Bearer secret", request.getHeader("Authorization"))
         assertEquals("s2.1-pro-free", request.getHeader("model"))
+        assertEquals("segment-key", request.getHeader("Idempotency-Key"))
         val body = JSONObject(request.body.readUtf8())
         assertEquals("[happy]你好[break]", body.getString("text"))
         assertEquals("voice-1", body.getString("reference_id"))

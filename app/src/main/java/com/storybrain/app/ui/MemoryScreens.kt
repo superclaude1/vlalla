@@ -67,8 +67,9 @@ import com.storybrain.app.data.StoryRepository
 
 @Composable
 fun MemoryCenterScreen(bookId: String, viewModel: AppViewModel, onBack: () -> Unit) {
-    val memories by viewModel.memories(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val detail by viewModel.memoryCenterDetail(bookId).collectAsStateWithLifecycle()
+    val memories = detail.memories
+    val characters = detail.characters
     val action by viewModel.memoryActionState.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
     var type by rememberSaveable { mutableStateOf<String?>(null) }

@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.storybrain.app.data.TtsProfileIds
@@ -14,6 +15,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.ttsDataStore by preferencesDataStore(name = "tts_settings_v4")
@@ -41,10 +43,25 @@ class TtsSettingsStore(private val context: Context) {
         context.ttsDataStore.edit { preferences -> preferences[GLOBAL_PROFILE] = profileId }
     }
 
+    suspend fun saveInsecureHttpAllowed(profileId: String, allowed: Boolean) {
+        context.ttsDataStore.edit { preferences ->
+            preferences[booleanPreferencesKey("allow_insecure_${safeProfileId(profileId)}")] = allowed
+        }
+    }
+
+    suspend fun isInsecureHttpAllowed(profileId: String, baseUrl: String): Boolean {
+        val key = booleanPreferencesKey("allow_insecure_${safeProfileId(profileId)}")
+        val preferences = configPreferences()
+        return preferences[key] ?: EndpointPolicy.isInsecure(baseUrl)
+    }
+
     fun writeApiKey(profileId: String, value: String) = secure.write(profileId, value.trim())
     fun readApiKey(profileId: String) = secure.read(profileId).orEmpty()
     fun hasApiKey(profileId: String) = secure.read(profileId).isNullOrBlank().not()
     fun clearApiKey(profileId: String) = secure.write(profileId, "")
+
+    private suspend fun configPreferences() = context.ttsDataStore.data.first()
+    private fun safeProfileId(profileId: String) = profileId.replace(Regex("[^A-Za-z0-9_-]"), "_")
 
     private companion object {
         val GLOBAL_PROFILE = stringPreferencesKey("global_profile_id")

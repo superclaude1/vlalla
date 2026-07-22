@@ -11,6 +11,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import kotlinx.coroutines.runBlocking
 
 class OpenAiTtsClientTest {
     private lateinit var server: MockWebServer
@@ -29,7 +30,7 @@ class OpenAiTtsClientTest {
     }
 
     @Test
-    fun detectsModelsAndSynthesizesWithInstructions() {
+    fun detectsModelsAndSynthesizesWithInstructions() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             """{"data":[{"id":"tts-model"},{"id":""}]}"""
         ))
@@ -40,7 +41,7 @@ class OpenAiTtsClientTest {
                 .setHeader("Content-Type", "application/octet-stream")
                 .setBody(okio.Buffer().write(audio))
         )
-        val client = OpenAiTtsClient(server.url("/v1/").toString())
+        val client = OpenAiTtsClient(server.url("/v1/").toString(), allowInsecureHttp = true)
 
         assertEquals(listOf("tts-model"), client.listModels("secret"))
         val modelRequest = server.takeRequest()
@@ -54,6 +55,7 @@ class OpenAiTtsClientTest {
                 voice = "openai:alloy",
                 model = "tts-model",
                 speed = 0.9f,
+                idempotencyKey = "segment-key",
                 supportsInstructions = true,
                 directives = TtsDirectives(emotion = "calm", delivery = "soft tone", rate = 1.1f)
             ),
@@ -64,6 +66,7 @@ class OpenAiTtsClientTest {
         assertTrue(audio.contentEquals(output.readBytes()))
         val speechRequest = server.takeRequest()
         assertEquals("/v1/audio/speech", speechRequest.path)
+        assertEquals("segment-key", speechRequest.getHeader("Idempotency-Key"))
         val body = JSONObject(speechRequest.body.readUtf8())
         assertEquals("tts-model", body.getString("model"))
         assertEquals("晚上好", body.getString("input"))

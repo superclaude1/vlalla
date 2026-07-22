@@ -1,7 +1,11 @@
 package com.storybrain.app.tts
 
 import java.io.File
-import java.util.concurrent.TimeUnit
+import java.io.IOException
+import com.storybrain.app.network.NetworkClients
+import com.storybrain.app.network.awaitResponse
+import com.storybrain.app.settings.EndpointPolicy
+import com.storybrain.app.settings.OpenAiCompatibleClient
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -9,22 +13,20 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
 
 data class FishVoicePage(val total: Int, val voices: List<TtsVoice>)
 
 class FishAudioClient(
     baseUrl: String = "https://api.fish.audio",
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val client: OkHttpClient = NetworkClients.longRunning,
+    allowInsecureHttp: Boolean = false
 ) {
-    private val baseUrl = baseUrl.trim().trimEnd('/')
+    private val baseUrl = EndpointPolicy.requireAllowed(baseUrl, allowInsecureHttp)
 
     fun listModels(): List<String> = listOf("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1")
 
-    fun listVoices(
+    suspend fun listVoices(
         apiKey: String,
         self: Boolean,
         query: String = "",
@@ -68,9 +70,9 @@ class FishAudioClient(
         return FishVoicePage(body.optInt("total", voices.size), voices)
     }
 
-    fun test(apiKey: String): Int = listVoices(apiKey, self = true, pageSize = 1).total
+    suspend fun test(apiKey: String): Int = listVoices(apiKey, self = true, pageSize = 1).total
 
-    fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File) {
+    suspend fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File) {
         require(request.voice.isNotBlank()) { "Fish Audio 需要选择音色" }
         val directedText = TtsDirectiveRenderer.fishText(request.text, request.directives)
         val body = JSONObject()
@@ -85,26 +87,34 @@ class FishAudioClient(
                 .put("normalize_loudness", true))
         val httpRequest = authorize(Request.Builder().url("$baseUrl/v1/tts"), apiKey)
             .header("model", request.model)
+            .apply { request.idempotencyKey?.let { header("Idempotency-Key", it) } }
             .post(body.toString().toRequestBody(JSON))
             .build()
         download(httpRequest, output)
     }
 
-    private fun download(request: Request, output: File) {
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw error(response.code, response.body?.string())
-            val contentType = response.header("Content-Type").orEmpty()
-            if (!contentType.startsWith("audio/")) throw TtsProviderException(response.code, false, "Fish Audio 未返回音频")
+    private suspend fun download(request: Request, output: File) {
+        val response = try {
+            client.newCall(request).awaitResponse()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: IOException) {
+            throw TtsProviderException(null, true, error.message ?: "Fish Audio 网络连接失败")
+        }
+        response.use {
+            if (!it.isSuccessful) throw error(it.code, it.body?.string(), it.header("Retry-After"))
+            val contentType = it.header("Content-Type").orEmpty()
+            if (!contentType.startsWith("audio/")) throw TtsProviderException(it.code, false, "Fish Audio 未返回音频")
             val part = File(output.parentFile, "${output.name}.part").apply { parentFile?.mkdirs() }
-            response.body?.byteStream()?.use { input -> part.outputStream().use(input::copyTo) }
-                ?: throw TtsProviderException(response.code, true, "Fish Audio 返回空音频")
-            if (part.length() == 0L) { part.delete(); throw TtsProviderException(response.code, true, "Fish Audio 返回空音频") }
+            it.body?.byteStream()?.use { input -> part.outputStream().use(input::copyTo) }
+                ?: throw TtsProviderException(it.code, true, "Fish Audio 返回空音频")
+            if (part.length() == 0L) { part.delete(); throw TtsProviderException(it.code, true, "Fish Audio 返回空音频") }
             if (output.exists()) output.delete()
             if (!part.renameTo(output)) { part.delete(); throw TtsProviderException(null, false, "无法保存 Fish Audio 音频") }
         }
     }
 
-    private fun executeJson(request: Request): JSONObject = client.newCall(request).execute().use { response ->
+    private suspend fun executeJson(request: Request): JSONObject = client.newCall(request).awaitResponse().use { response ->
         val text = response.body?.string().orEmpty()
         if (!response.isSuccessful) throw error(response.code, text)
         JSONObject(text.ifBlank { "{}" })
@@ -113,7 +123,7 @@ class FishAudioClient(
     private fun authorize(builder: Request.Builder, apiKey: String) =
         builder.header("Authorization", "Bearer $apiKey")
 
-    private fun error(code: Int, text: String?): TtsProviderException {
+    private fun error(code: Int, text: String?, retryAfter: String? = null): TtsProviderException {
         val message = runCatching { JSONObject(text.orEmpty()).optString("message") }.getOrNull().orEmpty()
         val display = when (code) {
             401 -> "Fish Audio API Key 无效"
@@ -122,7 +132,12 @@ class FishAudioClient(
             422 -> "Fish Audio 拒绝了配音参数"
             else -> message.ifBlank { "Fish Audio 请求失败（HTTP $code）" }
         }
-        return TtsProviderException(code, code == 429 || code >= 500, display)
+        return TtsProviderException(
+            code,
+            code == 408 || code == 429 || code >= 500,
+            display,
+            OpenAiCompatibleClient.retryAfterMillis(retryAfter)
+        )
     }
 
     private companion object { val JSON = "application/json; charset=utf-8".toMediaType() }

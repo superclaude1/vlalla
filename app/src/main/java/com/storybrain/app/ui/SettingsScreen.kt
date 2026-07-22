@@ -86,6 +86,16 @@ fun SettingsScreen(onOpenLibrary: () -> Unit, viewModel: SettingsViewModel = vie
             item {
                 Card { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(state.baseUrl, viewModel::updateBaseUrl, Modifier.fillMaxWidth(), label = { Text("API Base URL") }, singleLine = true)
+                    if (state.baseUrl.trim().startsWith("http://", ignoreCase = true)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(state.allowInsecureHttp, viewModel::setAllowInsecureHttp)
+                            Text(
+                                "允许此配置使用不安全 HTTP（仅限可信局域网）",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         state.apiKeyDraft, viewModel::updateApiKey, Modifier.fillMaxWidth(), label = { Text("API Key") },
                         placeholder = { Text(if (state.hasStoredKey) "已通过 Android Keystore 保存" else "输入 API Key") },
@@ -132,6 +142,16 @@ fun SettingsScreen(onOpenLibrary: () -> Unit, viewModel: SettingsViewModel = vie
                     Text(selectedProfile?.displayName ?: "配音平台", fontWeight = FontWeight.Bold)
                     if (selectedKind != TtsProviderKind.EDGE) {
                         OutlinedTextField(state.profileBaseUrl, viewModel::updateProfileBaseUrl, Modifier.fillMaxWidth(), label = { Text("API Base URL") }, singleLine = true)
+                        if (state.profileBaseUrl.trim().startsWith("http://", ignoreCase = true)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(state.profileAllowInsecureHttp, viewModel::setProfileAllowInsecureHttp)
+                                Text(
+                                    "允许当前提供商使用不安全 HTTP",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
                         OutlinedTextField(
                             state.ttsApiKeyDraft, viewModel::updateTtsApiKey, Modifier.fillMaxWidth(), label = { Text("API Key") },
                             placeholder = { Text(if (state.ttsHasStoredKey) "已加密保存" else "输入该平台 API Key") },

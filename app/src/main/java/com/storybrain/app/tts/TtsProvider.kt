@@ -1,6 +1,7 @@
 package com.storybrain.app.tts
 
 import java.io.File
+import com.storybrain.app.network.ProviderFailure
 
 data class TtsVoice(
     val id: String,
@@ -37,12 +38,12 @@ data class TtsSynthesisRequest(
 
 interface TtsProvider {
     val id: String
-    fun synthesize(request: TtsSynthesisRequest, output: File)
+    suspend fun synthesize(request: TtsSynthesisRequest, output: File)
 }
 
 class EdgeTtsProvider(private val client: EdgeTtsClient = EdgeTtsClient()) : TtsProvider {
     override val id = "edge"
-    override fun synthesize(request: TtsSynthesisRequest, output: File) {
+    override suspend fun synthesize(request: TtsSynthesisRequest, output: File) {
         client.synthesize(request.text, request.voice.removePrefix("edge:"), request.directives, output)
     }
 }
@@ -52,7 +53,7 @@ class FishAudioProvider(
     private val apiKey: String
 ) : TtsProvider {
     override val id = "fish"
-    override fun synthesize(request: TtsSynthesisRequest, output: File) {
+    override suspend fun synthesize(request: TtsSynthesisRequest, output: File) {
         client.synthesize(request, apiKey, output)
     }
 }
@@ -62,16 +63,17 @@ class OpenAiCompatibleTtsProvider(
     private val apiKey: String
 ) : TtsProvider {
     override val id = "openai-compatible"
-    override fun synthesize(request: TtsSynthesisRequest, output: File) {
+    override suspend fun synthesize(request: TtsSynthesisRequest, output: File) {
         client.synthesize(request, apiKey, output)
     }
 }
 
-class TtsProviderException(
+open class TtsProviderException(
     val statusCode: Int?,
-    val retryable: Boolean,
-    message: String
-) : Exception(message)
+    override val retryable: Boolean,
+    message: String,
+    val retryAfterMillis: Long? = null
+) : ProviderFailure(message, retryable = retryable)
 
 object TtsDirectiveRenderer {
     private val supportedEmotions = setOf(

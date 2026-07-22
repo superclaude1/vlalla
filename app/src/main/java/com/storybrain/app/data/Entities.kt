@@ -1,6 +1,7 @@
 package com.storybrain.app.data
 
 import androidx.room.Entity
+import androidx.room.Embedded
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -15,6 +16,19 @@ data class BookEntity(
     val totalChars: Long,
     val currentChapterIndex: Int = 0,
     val analysisCompleted: Int = 0
+)
+
+/** Single-query bookshelf model. Counts are calculated by Room instead of per-card Flows. */
+data class BookLibraryItem(
+    @Embedded val book: BookEntity,
+    val ttsCompleted: Int,
+    val activeAnalysisTasks: Int,
+    val activeTtsTasks: Int
+)
+
+data class ChapterTaskRef(
+    val id: String,
+    val bookId: String
 )
 
 @Entity(
@@ -130,4 +144,17 @@ data class ChatMessageEntity(
     val createdAt: Long
 )
 
-enum class TaskStatus { PENDING, QUEUED, RUNNING, COMPLETED, FAILED }
+enum class TaskStatus {
+    PENDING,
+    QUEUED,
+    RUNNING,
+    COMPLETED,
+    FAILED,
+    CANCELLED;
+
+    companion object {
+        /** Unknown values from a newer or damaged database remain safely retryable. */
+        fun fromStorage(value: String?): TaskStatus =
+            entries.firstOrNull { it.name == value } ?: FAILED
+    }
+}

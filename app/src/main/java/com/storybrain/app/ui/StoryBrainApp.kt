@@ -26,12 +26,15 @@ private object Routes {
 }
 
 @Composable
-fun StoryBrainApp(viewModel: AppViewModel = viewModel()) {
+fun StoryBrainApp(
+    viewModel: AppViewModel = viewModel(),
+    libraryViewModel: LibraryViewModel = viewModel()
+) {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Routes.Library) {
         composable(Routes.Library) {
             LibraryScreen(
-                viewModel = viewModel,
+                viewModel = libraryViewModel,
                 onImportStarted = { navController.navigate(Routes.Import) },
                 onOpenBook = { navController.navigate(Routes.book(it)) },
                 onOpenSettings = { navController.navigate(Routes.Settings) { launchSingleTop = true } }
@@ -44,9 +47,9 @@ fun StoryBrainApp(viewModel: AppViewModel = viewModel()) {
         }
         composable(Routes.Import) {
             ImportPreviewScreen(
-                viewModel = viewModel,
+                viewModel = libraryViewModel,
                 onBack = {
-                    viewModel.cancelImport()
+                    libraryViewModel.cancelImport()
                     navController.popBackStack()
                 },
                 onImported = { bookId ->

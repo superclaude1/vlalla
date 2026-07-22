@@ -27,6 +27,7 @@ data class SettingsUiState(
     val apiKeyDraft: String = "",
     val hasStoredKey: Boolean = false,
     val selectedModel: String = "",
+    val allowInsecureHttp: Boolean = false,
     val detectedModels: List<String> = emptyList(),
     val detecting: Boolean = false,
     val message: String? = null,
@@ -37,6 +38,7 @@ data class SettingsUiState(
     val profileBaseUrl: String = "",
     val profileModel: String = "edge-online",
     val profileSupportsInstructions: Boolean = false,
+    val profileAllowInsecureHttp: Boolean = false,
     val ttsApiKeyDraft: String = "",
     val ttsHasStoredKey: Boolean = false,
     val ttsModels: List<String> = emptyList(),
@@ -69,6 +71,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             _state.value = _state.value.copy(
                 baseUrl = llm.baseUrl,
                 selectedModel = llm.model,
+                allowInsecureHttp = llm.allowInsecureHttp,
                 hasStoredKey = llmStore.hasApiKey(),
                 profiles = profiles,
                 globalProfileId = global.globalProfileId,
@@ -76,6 +79,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 profileBaseUrl = selected.baseUrl,
                 profileModel = selected.model,
                 profileSupportsInstructions = selected.supportsInstructions,
+                profileAllowInsecureHttp = ttsStore.isInsecureHttpAllowed(selected.id, selected.baseUrl),
                 ttsHasStoredKey = ttsStore.hasApiKey(selected.id),
                 ttsModels = modelsFor(selected),
                 voicePool = repository.getTtsVoicePool(selected.id)
@@ -86,11 +90,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun updateBaseUrl(value: String) { _state.value = _state.value.copy(baseUrl = value, message = null) }
     fun updateApiKey(value: String) { _state.value = _state.value.copy(apiKeyDraft = value, message = null) }
     fun selectModel(value: String) { _state.value = _state.value.copy(selectedModel = value, message = null) }
+    fun setAllowInsecureHttp(value: Boolean) { _state.value = _state.value.copy(allowInsecureHttp = value, message = null) }
     fun updateProfileBaseUrl(value: String) { _state.value = _state.value.copy(profileBaseUrl = value, ttsMessage = null) }
     fun updateProfileModel(value: String) { _state.value = _state.value.copy(profileModel = value, ttsMessage = null) }
     fun updateTtsApiKey(value: String) { _state.value = _state.value.copy(ttsApiKeyDraft = value, ttsMessage = null) }
     fun updateVoiceQuery(value: String) { _state.value = _state.value.copy(voiceQuery = value) }
     fun setSupportsInstructions(value: Boolean) { _state.value = _state.value.copy(profileSupportsInstructions = value) }
+    fun setProfileAllowInsecureHttp(value: Boolean) { _state.value = _state.value.copy(profileAllowInsecureHttp = value, ttsMessage = null) }
 
     fun selectGlobalProfile(profileId: String) {
         viewModelScope.launch {
@@ -107,6 +113,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 profileBaseUrl = profile.baseUrl,
                 profileModel = profile.model,
                 profileSupportsInstructions = profile.supportsInstructions,
+                profileAllowInsecureHttp = ttsStore.isInsecureHttpAllowed(profile.id, profile.baseUrl),
                 ttsApiKeyDraft = "",
                 ttsHasStoredKey = ttsStore.hasApiKey(profileId),
                 ttsModels = modelsFor(profile),
@@ -124,7 +131,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             _state.value = snapshot.copy(detecting = true, message = null)
             runCatching {
                 withContext(Dispatchers.IO) {
-                    llmClient.listModels(snapshot.baseUrl, snapshot.apiKeyDraft.ifBlank { llmStore.readApiKey() })
+                    llmClient.listModels(
+                        snapshot.baseUrl,
+                        snapshot.apiKeyDraft.ifBlank { llmStore.readApiKey() },
+                        snapshot.allowInsecureHttp
+                    )
                         .also { require(it.isNotEmpty()) { "连接成功，但没有返回可用模型" } }
                 }
             }.onSuccess { models ->
@@ -144,7 +155,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun save() {
         val snapshot = _state.value
         viewModelScope.launch {
-            runCatching { llmStore.save(snapshot.baseUrl, snapshot.selectedModel, snapshot.apiKeyDraft.takeIf(String::isNotBlank)) }
+            runCatching {
+                llmStore.save(
+                    snapshot.baseUrl,
+                    snapshot.selectedModel,
+                    snapshot.apiKeyDraft.takeIf(String::isNotBlank),
+                    snapshot.allowInsecureHttp
+                )
+            }
                 .onSuccess { _state.value = _state.value.copy(apiKeyDraft = "", hasStoredKey = snapshot.apiKeyDraft.isNotBlank() || snapshot.hasStoredKey, message = "LLM 设置已安全保存", isError = false) }
                 .onFailure { _state.value = _state.value.copy(message = it.message ?: "保存失败", isError = true) }
         }
@@ -167,12 +185,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                         TtsProviderKind.FISH_AUDIO -> {
                             val key = snapshot.ttsApiKeyDraft.ifBlank { ttsStore.readApiKey(profile.id) }
                             require(key.isNotBlank()) { "请输入 Fish Audio API Key" }
-                            val count = FishAudioClient(snapshot.profileBaseUrl).test(key)
-                            FishAudioClient(snapshot.profileBaseUrl).listModels() to "Fish Audio 连接成功，账号音色 $count 个"
+                            val client = FishAudioClient(
+                                snapshot.profileBaseUrl,
+                                allowInsecureHttp = snapshot.profileAllowInsecureHttp
+                            )
+                            val count = client.test(key)
+                            client.listModels() to "Fish Audio 连接成功，账号音色 $count 个"
                         }
                         TtsProviderKind.OPENAI_COMPATIBLE -> {
                             val key = snapshot.ttsApiKeyDraft.ifBlank { ttsStore.readApiKey(profile.id) }
-                            val models = OpenAiTtsClient(snapshot.profileBaseUrl).listModels(key)
+                            val models = OpenAiTtsClient(
+                                snapshot.profileBaseUrl,
+                                allowInsecureHttp = snapshot.profileAllowInsecureHttp
+                            ).listModels(key)
                             models to "兼容 TTS 连接成功，检测到 ${models.size} 个模型"
                         }
                     }
@@ -201,7 +226,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 withContext(Dispatchers.IO) {
                     val key = snapshot.ttsApiKeyDraft.ifBlank { ttsStore.readApiKey(profile.id) }
                     require(key.isNotBlank()) { "请输入 Fish Audio API Key" }
-                    FishAudioClient(snapshot.profileBaseUrl).listVoices(key, self = own, query = snapshot.voiceQuery)
+                    FishAudioClient(
+                        snapshot.profileBaseUrl,
+                        allowInsecureHttp = snapshot.profileAllowInsecureHttp
+                    ).listVoices(key, self = own, query = snapshot.voiceQuery)
                 }
             }.onSuccess { page ->
                 _state.value = _state.value.copy(ttsDetecting = false, voices = page.voices, voiceTotal = page.total, ttsMessage = "找到 ${page.total} 个音色", ttsIsError = false)
@@ -242,13 +270,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val profile = snapshot.profiles.firstOrNull { it.id == snapshot.selectedProfileId } ?: return
         viewModelScope.launch {
             runCatching {
+                val normalizedBaseUrl = if (profile.kind == TtsProviderKind.EDGE.name) "" else {
+                    EndpointPolicy.requireAllowed(snapshot.profileBaseUrl, snapshot.profileAllowInsecureHttp)
+                }
                 repository.saveTtsProfile(
                     profile.copy(
-                        baseUrl = snapshot.profileBaseUrl,
+                        baseUrl = normalizedBaseUrl,
                         model = snapshot.profileModel,
                         supportsInstructions = snapshot.profileSupportsInstructions
                     )
                 )
+                ttsStore.saveInsecureHttpAllowed(profile.id, snapshot.profileAllowInsecureHttp)
                 snapshot.ttsApiKeyDraft.takeIf(String::isNotBlank)?.let { ttsStore.writeApiKey(profile.id, it) }
             }.onSuccess {
                 val profiles = repository.getTtsProfiles()
@@ -270,7 +302,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun modelsFor(profile: TtsProviderProfileEntity) = when (TtsProviderKind.valueOf(profile.kind)) {
-        TtsProviderKind.FISH_AUDIO -> FishAudioClient(profile.baseUrl).listModels()
+        TtsProviderKind.FISH_AUDIO -> listOf("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1")
         else -> listOf(profile.model).filter(String::isNotBlank)
     }
 

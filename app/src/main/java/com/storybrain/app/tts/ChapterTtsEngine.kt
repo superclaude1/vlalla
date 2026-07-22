@@ -14,6 +14,10 @@ import com.storybrain.app.settings.TtsSettingsStore
 import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
+import kotlin.random.Random
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,8 +35,8 @@ class ChapterTtsEngine(
     suspend fun generate(
         bookId: String,
         chapterId: String,
-        onProgress: (completed: Int, total: Int) -> Unit,
-        onStage: (String) -> Unit = {}
+        onProgress: suspend (completed: Int, total: Int) -> Unit,
+        onStage: suspend (String) -> Unit = {}
     ): TtsGenerationResult {
         repository.ensureDefaultTtsProfiles()
         val chapter = repository.getChapter(chapterId) ?: error("找不到本章")
@@ -120,6 +124,7 @@ class ChapterTtsEngine(
         val manifestSegments = JSONArray()
         return runCatching {
             jobs.forEachIndexed { index, job ->
+                coroutineContext.ensureActive()
                 onStage("正在使用 ${job.resolved.profile.displayName} 生成 ${index + 1}/${jobs.size} 段")
                 val fileName = "%04d.mp3".format(index)
                 val cacheFile = File(cache, "${job.cacheKey}.mp3")
@@ -174,7 +179,7 @@ class ChapterTtsEngine(
         }
     }
 
-    private fun synthesizeWithRetry(job: SpeechJob, output: File) {
+    private suspend fun synthesizeWithRetry(job: SpeechJob, output: File) {
         val provider = provider(job.resolved)
         val request = TtsSynthesisRequest(
             text = job.text,
@@ -188,27 +193,39 @@ class ChapterTtsEngine(
         var last: Throwable? = null
         repeat(3) { attempt ->
             try {
+                coroutineContext.ensureActive()
                 provider.synthesize(request, output)
                 return
             } catch (error: Throwable) {
                 last = error
                 val retryable = (error as? TtsProviderException)?.retryable == true
                 if (!retryable || attempt == 2) throw error
-                Thread.sleep(500L * (1 shl attempt))
+                val retryAfter = (error as? TtsProviderException)?.retryAfterMillis
+                val backoff = retryAfter ?: (500L * (1 shl attempt) + Random.nextLong(0, 250))
+                delay(backoff.coerceAtMost(30_000L))
             }
         }
         throw last ?: error("配音生成失败")
     }
 
-    private fun provider(resolved: ResolvedTtsVoice): TtsProvider = when (TtsProviderKind.valueOf(resolved.profile.kind)) {
+    private suspend fun provider(resolved: ResolvedTtsVoice): TtsProvider = when (TtsProviderKind.valueOf(resolved.profile.kind)) {
         TtsProviderKind.EDGE -> edgeProvider
         TtsProviderKind.FISH_AUDIO -> {
             val key = settings.readApiKey(resolved.profile.id)
             require(key.isNotBlank()) { "请先在设置中保存 Fish Audio API Key" }
-            FishAudioProvider(FishAudioClient(resolved.profile.baseUrl), key)
+            FishAudioProvider(
+                FishAudioClient(
+                    resolved.profile.baseUrl,
+                    allowInsecureHttp = settings.isInsecureHttpAllowed(resolved.profile.id, resolved.profile.baseUrl)
+                ),
+                key
+            )
         }
         TtsProviderKind.OPENAI_COMPATIBLE -> OpenAiCompatibleTtsProvider(
-            OpenAiTtsClient(resolved.profile.baseUrl),
+            OpenAiTtsClient(
+                resolved.profile.baseUrl,
+                allowInsecureHttp = settings.isInsecureHttpAllowed(resolved.profile.id, resolved.profile.baseUrl)
+            ),
             settings.readApiKey(resolved.profile.id)
         )
     }

@@ -5,6 +5,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import java.security.KeyStore
@@ -19,24 +20,29 @@ private val Context.llmDataStore by preferencesDataStore(name = "llm_settings")
 
 data class LlmConfig(
     val baseUrl: String = "https://api.openai.com/v1",
-    val model: String = ""
+    val model: String = "",
+    val allowInsecureHttp: Boolean = false
 )
 
 class LlmSettingsStore(private val context: Context) {
     private val secureKeyStore = SecureApiKeyStore(context)
 
     val config: Flow<LlmConfig> = context.llmDataStore.data.map { preferences ->
+        val baseUrl = preferences[BASE_URL] ?: "https://api.openai.com/v1"
         LlmConfig(
-            baseUrl = preferences[BASE_URL] ?: "https://api.openai.com/v1",
-            model = preferences[MODEL] ?: ""
+            baseUrl = baseUrl,
+            model = preferences[MODEL] ?: "",
+            // Existing HTTP configurations stay compatible until the user saves them again.
+            allowInsecureHttp = preferences[ALLOW_INSECURE_HTTP] ?: EndpointPolicy.isInsecure(baseUrl)
         )
     }
 
-    suspend fun save(baseUrl: String, model: String, apiKey: String?) {
-        val normalized = OpenAiCompatibleClient.normalizeBaseUrl(baseUrl)
+    suspend fun save(baseUrl: String, model: String, apiKey: String?, allowInsecureHttp: Boolean = false) {
+        val normalized = EndpointPolicy.requireAllowed(baseUrl, allowInsecureHttp)
         context.llmDataStore.edit { preferences ->
             preferences[BASE_URL] = normalized
             preferences[MODEL] = model.trim()
+            preferences[ALLOW_INSECURE_HTTP] = allowInsecureHttp
         }
         if (apiKey != null) secureKeyStore.write(apiKey.trim())
     }
@@ -48,6 +54,7 @@ class LlmSettingsStore(private val context: Context) {
     companion object {
         private val BASE_URL = stringPreferencesKey("base_url")
         private val MODEL = stringPreferencesKey("model")
+        private val ALLOW_INSECURE_HTTP = booleanPreferencesKey("allow_insecure_http")
     }
 }
 

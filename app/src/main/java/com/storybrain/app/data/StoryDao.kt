@@ -9,6 +9,18 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface StoryDao {
+    @Query("""
+        SELECT b.*,
+            COALESCE(SUM(CASE WHEN c.ttsStatus = 'COMPLETED' THEN 1 ELSE 0 END), 0) AS ttsCompleted,
+            COALESCE(SUM(CASE WHEN c.analysisStatus IN ('QUEUED', 'RUNNING') THEN 1 ELSE 0 END), 0) AS activeAnalysisTasks,
+            COALESCE(SUM(CASE WHEN c.ttsStatus IN ('QUEUED', 'RUNNING') THEN 1 ELSE 0 END), 0) AS activeTtsTasks
+        FROM books b
+        LEFT JOIN chapters c ON c.bookId = b.id
+        GROUP BY b.id
+        ORDER BY b.importedAt DESC
+    """)
+    fun observeLibraryItems(): Flow<List<BookLibraryItem>>
+
     @Query("SELECT * FROM books ORDER BY importedAt DESC")
     fun observeBooks(): Flow<List<BookEntity>>
 
@@ -35,6 +47,12 @@ interface StoryDao {
 
     @Query("SELECT id FROM chapters")
     suspend fun getAllChapterIds(): List<String>
+
+    @Query("SELECT id, bookId FROM chapters WHERE analysisStatus IN ('QUEUED', 'RUNNING')")
+    suspend fun getActiveAnalysisTasks(): List<ChapterTaskRef>
+
+    @Query("SELECT id, bookId FROM chapters WHERE ttsStatus IN ('QUEUED', 'RUNNING')")
+    suspend fun getActiveTtsTasks(): List<ChapterTaskRef>
 
     @Query("SELECT * FROM characters WHERE bookId = :bookId ORDER BY firstChapterIndex")
     suspend fun getCharacters(bookId: String): List<StoryCharacterEntity>
@@ -261,6 +279,9 @@ interface StoryDao {
     @Query("UPDATE chapters SET ttsStatus = :status WHERE id = :chapterId")
     suspend fun updateTtsStatus(chapterId: String, status: String)
 
+    @Query("UPDATE chapters SET ttsStatus = :cancelled WHERE id = :chapterId AND ttsStatus IN ('QUEUED', 'RUNNING')")
+    suspend fun cancelTtsTask(chapterId: String, cancelled: String)
+
     @Query("UPDATE chapters SET ttsStatus = :status, ttsManifestPath = :manifestPath WHERE id = :chapterId")
     suspend fun updateTtsResult(chapterId: String, status: String, manifestPath: String?)
 
@@ -269,6 +290,12 @@ interface StoryDao {
 
     @Query("UPDATE chapters SET analysisStatus = :status WHERE id IN (:chapterIds)")
     suspend fun updateAnalysisStatus(chapterIds: List<String>, status: String)
+
+    @Query("UPDATE chapters SET analysisStatus = :cancelled WHERE bookId = :bookId AND analysisStatus IN ('QUEUED', 'RUNNING')")
+    suspend fun cancelAnalysisTasks(bookId: String, cancelled: String)
+
+    @Query("UPDATE chapters SET analysisStatus = :failed WHERE bookId = :bookId AND analysisStatus IN ('QUEUED', 'RUNNING')")
+    suspend fun failAnalysisTasks(bookId: String, failed: String)
 
     @Query("UPDATE books SET analysisCompleted = :completed WHERE id = :bookId")
     suspend fun updateAnalysisCompleted(bookId: String, completed: Int)

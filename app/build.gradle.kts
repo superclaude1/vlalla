@@ -1,8 +1,19 @@
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.kapt")
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.ksp)
 }
+
+val releaseKeystorePath = providers.environmentVariable("ZHANGJING_KEYSTORE").orNull
+val releaseStorePassword = providers.environmentVariable("ZHANGJING_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ZHANGJING_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ZHANGJING_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseKeystorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.storybrain.app"
@@ -19,13 +30,26 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
@@ -43,44 +67,41 @@ android {
     sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 }
 
-kapt {
-    arguments {
-        arg("room.schemaLocation", "$projectDir/schemas")
-    }
-}
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.02.02")
+    val composeBom = platform(libs.compose.bom)
     implementation(composeBom)
     androidTestImplementation(composeBom)
 
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.activity:activity-compose:1.8.2")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation(libs.core.ktx)
+    implementation(libs.activity.compose)
+    implementation(libs.lifecycle.runtime.ktx)
+    implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.lifecycle.viewmodel.compose)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.material.icons)
+    implementation(libs.navigation.compose)
 
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    kapt("androidx.room:room-compiler:2.6.1")
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
 
-    implementation("androidx.work:work-runtime-ktx:2.9.0")
-    implementation("androidx.datastore:datastore-preferences:1.0.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(libs.work.runtime)
+    implementation(libs.datastore.preferences)
+    implementation(libs.okhttp)
 
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
-    testImplementation("org.json:json:20240303")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
-    androidTestImplementation("androidx.room:room-testing:2.6.1")
-    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation(libs.junit)
+    testImplementation(libs.mockwebserver)
+    testImplementation(libs.json)
+    testImplementation(libs.work.testing)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.room.testing)
+    androidTestImplementation(libs.mockwebserver)
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.tooling)
+    debugImplementation(libs.compose.ui.test.manifest)
 }

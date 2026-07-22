@@ -124,17 +124,17 @@ import kotlin.math.sin
 
 @Composable
 fun LibraryScreen(
-    viewModel: AppViewModel,
+    viewModel: LibraryViewModel,
     onImportStarted: () -> Unit,
     onOpenBook: (String) -> Unit,
     onOpenSettings: () -> Unit
 ) {
-    val books by viewModel.books.collectAsStateWithLifecycle(initialValue = emptyList())
+    val books by viewModel.libraryItems.collectAsStateWithLifecycle(initialValue = emptyList())
     var libraryQuery by rememberSaveable { mutableStateOf("") }
     var sortByTitle by rememberSaveable { mutableStateOf(false) }
     val visibleBooks = remember(books, libraryQuery, sortByTitle) {
-        books.filter { it.title.contains(libraryQuery, true) }
-            .let { list -> if (sortByTitle) list.sortedBy { it.title.lowercase() } else list }
+        books.filter { it.book.title.contains(libraryQuery, true) }
+            .let { list -> if (sortByTitle) list.sortedBy { it.book.title.lowercase() } else list }
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -202,12 +202,11 @@ fun LibraryScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-                items(visibleBooks, key = { it.id }) { book ->
-                    val bookChapters by viewModel.chapters(book.id).collectAsStateWithLifecycle(initialValue = emptyList())
+                items(visibleBooks, key = { it.book.id }) { item ->
                     BookCard(
-                        book = book,
-                        ttsCompleted = bookChapters.count { it.ttsStatus == TaskStatus.COMPLETED.name },
-                        onClick = { onOpenBook(book.id) }
+                        book = item.book,
+                        ttsCompleted = item.ttsCompleted,
+                        onClick = { onOpenBook(item.book.id) }
                     )
                 }
                 if (visibleBooks.isEmpty()) item { Text("没有匹配的小说", modifier = Modifier.padding(24.dp)) }
@@ -278,7 +277,7 @@ private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
 }
 
 @Composable
-fun ImportPreviewScreen(viewModel: AppViewModel, onBack: () -> Unit, onImported: (String) -> Unit) {
+fun ImportPreviewScreen(viewModel: LibraryViewModel, onBack: () -> Unit, onImported: (String) -> Unit) {
     val state by viewModel.importState.collectAsStateWithLifecycle()
     Scaffold(
         topBar = {
@@ -356,12 +355,13 @@ fun BookScreen(
     onOpenBrain: () -> Unit,
     onOpenMemory: () -> Unit
 ) {
-    val book by viewModel.book(bookId).collectAsStateWithLifecycle(initialValue = null)
-    val chapters by viewModel.chapters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val detail by viewModel.bookDetail(bookId).collectAsStateWithLifecycle()
+    val book = detail.book
+    val chapters = detail.chapters
     val analysis by viewModel.analysisState.collectAsStateWithLifecycle()
-    val ttsProfiles by viewModel.ttsProfiles.collectAsStateWithLifecycle(initialValue = emptyList())
-    val globalTts by viewModel.ttsConfig.collectAsStateWithLifecycle(initialValue = com.storybrain.app.settings.TtsGlobalConfig())
-    val bookTts by viewModel.bookTtsSetting(bookId).collectAsStateWithLifecycle(initialValue = null)
+    val ttsProfiles = detail.ttsProfiles
+    val globalTts = detail.globalTts
+    val bookTts = detail.bookTts
     var analysisCountText by rememberSaveable(bookId) { mutableStateOf("5") }
     var moreMenuExpanded by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -369,6 +369,10 @@ fun BookScreen(
     var deleteError by remember { mutableStateOf<String?>(null) }
     val initializedChapters = minOf(15, book?.chapterCount ?: 15)
     val initializationComplete = (book?.analysisCompleted ?: 0) >= initializedChapters
+    val analysisActive = chapters.any {
+        TaskStatus.fromStorage(it.analysisStatus) == TaskStatus.QUEUED ||
+            TaskStatus.fromStorage(it.analysisStatus) == TaskStatus.RUNNING
+    }
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { if (!deleting) confirmDelete = false },
@@ -489,20 +493,31 @@ fun BookScreen(
                                     chapterCount = if (initializationComplete) analysisCountText.toIntOrNull() ?: 1 else null
                                 )
                             },
-                            enabled = !analysis.running && (book?.analysisCompleted ?: 0) < (book?.chapterCount ?: 0),
+                            enabled = !analysisActive && (book?.analysisCompleted ?: 0) < (book?.chapterCount ?: 0),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Rounded.CloudSync, null)
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 when {
-                                    analysis.running && analysis.bookId == bookId -> "LLM 分析中…"
+                                    analysisActive -> "LLM 分析中…"
                                     !initializationComplete && (book?.analysisCompleted ?: 0) == 0 -> "分析前15章"
                                     !initializationComplete -> "继续初始化至第15章"
                                     (book?.analysisCompleted ?: 0) >= (book?.chapterCount ?: 0) -> "全书分析完成"
                                     else -> "继续分析 ${analysisCountText.toIntOrNull() ?: 1} 章"
                                 }
                             )
+                        }
+                        if (analysisActive) {
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = { viewModel.cancelAnalysis(bookId) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Rounded.Stop, null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("取消后台分析")
+                            }
                         }
                         if (analysis.bookId == bookId && analysis.message != null) {
                             Spacer(Modifier.height(8.dp))
@@ -580,9 +595,10 @@ fun ReaderScreen(
     onBack: () -> Unit,
     onOpenChapter: (String) -> Unit
 ) {
-    val chapter by viewModel.chapter(chapterId).collectAsStateWithLifecycle(initialValue = null)
-    val chapters by viewModel.chapters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val reader by viewModel.readerDetail(bookId, chapterId).collectAsStateWithLifecycle()
+    val chapter = reader.chapter
+    val chapters = reader.chapters
+    val characters = reader.characters
     val ttsState by viewModel.ttsState.collectAsStateWithLifecycle()
     var pendingMemory by remember { mutableStateOf<PendingReadingMemory?>(null) }
     val knownSpeakers = remember(characters) {
@@ -602,6 +618,8 @@ fun ReaderScreen(
         chapter?.let { TextToChatParser.parse(it.content, knownSpeakers) }.orEmpty()
     }
     val currentIndex = chapters.indexOfFirst { it.id == chapterId }
+    val ttsTaskActive = chapter?.ttsStatus?.let(TaskStatus::fromStorage)
+        ?.let { it == TaskStatus.QUEUED || it == TaskStatus.RUNNING } == true
     pendingMemory?.let { memory ->
         MemoryEditorDialog(
             title = "保存为原文记忆",
@@ -633,7 +651,7 @@ fun ReaderScreen(
                 actions = {
                     if (!chapter?.ttsManifestPath.isNullOrBlank()) {
                         IconButton(
-                            enabled = !ttsState.running,
+                            enabled = true,
                             onClick = {
                                 val current = chapter ?: return@IconButton
                                 if (ttsState.playing && ttsState.chapterId == current.id) viewModel.stopChapterTts()
@@ -647,7 +665,7 @@ fun ReaderScreen(
                         }
                     }
                     IconButton(
-                        enabled = !ttsState.running,
+                        enabled = !ttsTaskActive,
                         onClick = { chapter?.let { viewModel.generateChapterTts(bookId, it.id) } }
                     ) {
                         Icon(Icons.Rounded.GraphicEq, if (chapter?.ttsManifestPath == null) "生成本章配音" else "重新生成本章配音")
@@ -692,17 +710,22 @@ fun ReaderScreen(
             contentPadding = PaddingValues(14.dp, 16.dp, 14.dp, 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (ttsState.chapterId == chapterId && (ttsState.progress != null || ttsState.message != null)) {
+            if (ttsTaskActive || (ttsState.chapterId == chapterId && (ttsState.progress != null || ttsState.message != null))) {
                 item {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                         Column(Modifier.fillMaxWidth().padding(12.dp)) {
                             Text(
-                                ttsState.progress ?: ttsState.message.orEmpty(),
+                                if (ttsTaskActive) "配音任务正在后台执行，离开页面不会中断" else ttsState.progress ?: ttsState.message.orEmpty(),
                                 color = if (ttsState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                             )
-                            if (ttsState.running) {
+                            if (ttsTaskActive) {
                                 Spacer(Modifier.height(6.dp))
                                 LinearProgressIndicator(Modifier.fillMaxWidth())
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedButton(
+                                    onClick = { viewModel.cancelChapterTts(chapterId) },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text("取消配音任务") }
                             }
                         }
                     }
@@ -771,17 +794,18 @@ fun StoryBrainScreen(
     onOpenMemory: () -> Unit,
     onChatCharacter: (String) -> Unit
 ) {
-    val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val relations by viewModel.relations(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val nodes by viewModel.plotNodes(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val memoryCount by viewModel.memoryCount(bookId).collectAsStateWithLifecycle(initialValue = 0)
-    val ttsConfig by viewModel.ttsConfig.collectAsStateWithLifecycle(initialValue = com.storybrain.app.settings.TtsGlobalConfig())
-    val ttsProfiles by viewModel.ttsProfiles.collectAsStateWithLifecycle(initialValue = emptyList())
-    val bookTts by viewModel.bookTtsSetting(bookId).collectAsStateWithLifecycle(initialValue = null)
-    val activeBindings by viewModel.activeVoiceBindings(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
-    val edgeVoices by viewModel.ttsVoicePool(TtsProfileIds.EDGE).collectAsStateWithLifecycle(initialValue = emptyList())
-    val fishVoices by viewModel.ttsVoicePool(TtsProfileIds.FISH).collectAsStateWithLifecycle(initialValue = emptyList())
-    val compatibleVoices by viewModel.ttsVoicePool(TtsProfileIds.OPENAI).collectAsStateWithLifecycle(initialValue = emptyList())
+    val brain by viewModel.storyBrainDetail(bookId).collectAsStateWithLifecycle()
+    val characters = brain.characters
+    val relations = brain.relations
+    val nodes = brain.nodes
+    val memoryCount = brain.memoryCount
+    val ttsConfig = brain.ttsConfig
+    val ttsProfiles = brain.ttsProfiles
+    val bookTts = brain.bookTts
+    val activeBindings = brain.activeBindings
+    val edgeVoices = brain.edgeVoices
+    val fishVoices = brain.fishVoices
+    val compatibleVoices = brain.compatibleVoices
     val exportState by viewModel.exportState.collectAsStateWithLifecycle()
     var selectedTab by remember { mutableIntStateOf(0) }
     var pendingExport by remember { mutableStateOf<String?>(null) }
@@ -1395,5 +1419,6 @@ private fun ttsLabel(status: String): String = when (status) {
     TaskStatus.RUNNING.name -> "正在配音"
     TaskStatus.COMPLETED.name -> "配音可用"
     TaskStatus.FAILED.name -> "配音失败"
+    TaskStatus.CANCELLED.name -> "配音已取消"
     else -> "未配音"
 }

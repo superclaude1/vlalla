@@ -1,0 +1,12 @@
+*.iml
+.idea/
+.gradle/
+/local.properties
+/build/
+/app/build/
+/dist/
+/captures/
+.externalNativeBuild/
+.cxx/
+__pycache__/
+*.pyc

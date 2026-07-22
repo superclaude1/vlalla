@@ -24,12 +24,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 
 data class PlaybackUiState(
     val connected: Boolean = false,
@@ -96,21 +98,23 @@ class PlaybackRepository(
         startBlockIndex: Int? = null,
         autoPlay: Boolean = true
     ): Result<Unit> = runCatching {
-        val controller = controller()
-        val prepared = buildQueue(bookId, chapterId)
-        require(prepared.items.isNotEmpty()) { "本章没有可播放的配音，请先生成" }
-        queue = prepared.refs
-        queueEndsAtMissingAudio = prepared.endsAtMissingAudio
-        val startIndex = startBlockIndex?.let { block ->
-            queue.indexOfFirst { it.chapterId == chapterId && it.blockIndex >= block }.takeIf { it >= 0 }
-        } ?: queue.indexOfFirst { it.chapterId == chapterId }.coerceAtLeast(0)
-        controller.setMediaItems(prepared.items, startIndex, 0)
-        controller.prepare()
-        controller.playWhenReady = autoPlay
-        lastChapterId = chapterId
-        _uiState.value = _uiState.value.copy(missingNextChapterAudio = false, error = null)
-        updateState(controller)
-        persist(force = true)
+        val prepared = withContext(Dispatchers.IO) { buildQueue(bookId, chapterId) }
+        withContext(Dispatchers.Main.immediate) {
+            val controller = controller()
+            require(prepared.items.isNotEmpty()) { "本章没有可播放的配音，请先生成" }
+            queue = prepared.refs
+            queueEndsAtMissingAudio = prepared.endsAtMissingAudio
+            val startIndex = startBlockIndex?.let { block ->
+                queue.indexOfFirst { it.chapterId == chapterId && it.blockIndex >= block }.takeIf { it >= 0 }
+            } ?: queue.indexOfFirst { it.chapterId == chapterId }.coerceAtLeast(0)
+            controller.setMediaItems(prepared.items, startIndex, 0)
+            controller.prepare()
+            controller.playWhenReady = autoPlay
+            lastChapterId = chapterId
+            _uiState.value = _uiState.value.copy(missingNextChapterAudio = false, error = null)
+            updateState(controller)
+            persist(force = true)
+        }
     }.onFailure { error ->
         _uiState.value = _uiState.value.copy(error = error.message ?: "音频播放失败")
     }
@@ -192,6 +196,14 @@ class PlaybackRepository(
         _uiState.value = _uiState.value.copy(error = null, missingNextChapterAudio = false)
     }
 
+    fun release() {
+        sleepJob?.cancel()
+        scope.cancel()
+        ContextCompat.getMainExecutor(appContext).execute {
+            MediaController.releaseFuture(controllerFuture)
+        }
+    }
+
     private fun jumpChapter(delta: Int) {
         val current = _uiState.value
         val targetIndex = current.chapterIndex + delta
@@ -202,7 +214,9 @@ class PlaybackRepository(
     private suspend fun restore(controller: MediaController) {
         val saved = stateStore.load()
         if (saved.bookId.isBlank() || saved.chapterId.isBlank()) return
-        val prepared = runCatching { buildQueue(saved.bookId, saved.chapterId) }.getOrNull() ?: return
+        val prepared = runCatching {
+            withContext(Dispatchers.IO) { buildQueue(saved.bookId, saved.chapterId) }
+        }.getOrNull() ?: return
         if (prepared.items.isEmpty()) return
         queue = prepared.refs
         queueEndsAtMissingAudio = prepared.endsAtMissingAudio

@@ -142,7 +142,10 @@ class StoryRepository(private val database: AppDatabase) {
         if (cleanQuery.isBlank()) return emptyList()
         val matchQuery = MemorySearch.matchQuery(cleanQuery)
         if (matchQuery.isBlank()) return emptyList()
-        return dao.searchChapters(bookId, matchQuery, limit).flatMap { chapter ->
+        val indexedChapters = dao.searchChapters(bookId, matchQuery, limit).ifEmpty {
+            dao.searchChaptersByIndexedContent(bookId, cleanQuery, limit)
+        }
+        return indexedChapters.flatMap { chapter ->
             val hits = mutableListOf<ChapterSearchHit>()
             var from = 0
             while (hits.size < 3) {

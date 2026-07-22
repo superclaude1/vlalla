@@ -31,7 +31,9 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
@@ -53,6 +55,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -73,6 +76,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -303,6 +307,12 @@ fun ReaderExperienceScreen(
             topBar = {
                 if (chromeVisible) {
                     TopAppBar(
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = palette.surface,
+                            titleContentColor = palette.text,
+                            navigationIconContentColor = palette.text,
+                            actionIconContentColor = palette.text
+                        ),
                         title = {
                             Column {
                                 Text(chapter?.title ?: "正在读取", maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -332,6 +342,7 @@ fun ReaderExperienceScreen(
                         currentIndex = currentIndex,
                         chapterCount = state.chapters.size,
                         mode = mode,
+                        palette = palette,
                         hasAudio = !chapter?.ttsManifestPath.isNullOrBlank(),
                         playing = playback.isPlaying && playback.chapterId == chapter?.id,
                         onMode = { newMode ->
@@ -585,6 +596,7 @@ private fun ReaderBottomBar(
     currentIndex: Int,
     chapterCount: Int,
     mode: ReadingMode,
+    palette: ReaderPalette,
     hasAudio: Boolean,
     playing: Boolean,
     onMode: (ReadingMode) -> Unit,
@@ -592,12 +604,28 @@ private fun ReaderBottomBar(
     onNext: () -> Unit,
     onAudio: () -> Unit
 ) {
-    Surface(shadowElevation = 8.dp) {
+    Surface(color = palette.surface, contentColor = palette.text, shadowElevation = 8.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                FilterChip(selected = mode == ReadingMode.CHAT, onClick = { onMode(ReadingMode.CHAT) }, label = { Text("聊天") })
+                val chipColors = FilterChipDefaults.filterChipColors(
+                    containerColor = palette.surface,
+                    labelColor = palette.text,
+                    selectedContainerColor = palette.accent.copy(alpha = .22f),
+                    selectedLabelColor = palette.text
+                )
+                FilterChip(
+                    selected = mode == ReadingMode.CHAT,
+                    onClick = { onMode(ReadingMode.CHAT) },
+                    label = { Text("聊天") },
+                    colors = chipColors
+                )
                 Spacer(Modifier.width(8.dp))
-                FilterChip(selected = mode == ReadingMode.ORIGINAL, onClick = { onMode(ReadingMode.ORIGINAL) }, label = { Text("原文") })
+                FilterChip(
+                    selected = mode == ReadingMode.ORIGINAL,
+                    onClick = { onMode(ReadingMode.ORIGINAL) },
+                    label = { Text("原文") },
+                    colors = chipColors
+                )
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 IconButton(enabled = currentIndex > 0, onClick = onPrevious) {
@@ -864,7 +892,13 @@ private fun ReaderSettingsSheet(
 ) {
     var draft by remember(initial) { mutableStateOf(initial) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Text("阅读样式", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ReaderTheme.entries.forEach { theme ->

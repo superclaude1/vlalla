@@ -117,7 +117,12 @@ class CharacterChatServiceIntegrationTest {
                 )
         )
         val settings = LlmSettingsStore(context)
-        settings.save(server.url("/v1").toString(), "mock-model", "test-key")
+        settings.save(
+            server.url("/v1").toString(),
+            "mock-model",
+            "test-key",
+            allowInsecureHttp = true
+        )
         val reply = CharacterChatService(repository, settings).send(
             "book", "character", current.id, "请结合推荐关键词回答"
         )

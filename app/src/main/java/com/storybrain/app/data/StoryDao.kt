@@ -108,6 +108,10 @@ interface StoryDao {
     @Query("SELECT c.* FROM chapters c JOIN chapter_search_fts f ON f.chapterId = c.id WHERE chapter_search_fts MATCH :matchQuery AND c.bookId = :bookId ORDER BY c.chapterIndex LIMIT :limit")
     suspend fun searchChapters(bookId: String, matchQuery: String, limit: Int): List<ChapterEntity>
 
+    /** Compatibility path for platform SQLite builds whose FTS tokenizer does not match CJK bigrams. */
+    @Query("SELECT c.* FROM chapters c JOIN chapter_search_fts f ON f.chapterId = c.id WHERE f.content LIKE '%' || :query || '%' AND c.bookId = :bookId ORDER BY c.chapterIndex LIMIT :limit")
+    suspend fun searchChaptersByIndexedContent(bookId: String, query: String, limit: Int): List<ChapterEntity>
+
     @Query("SELECT * FROM chapters c WHERE NOT EXISTS (SELECT 1 FROM chapter_search_fts f WHERE f.chapterId = c.id) ORDER BY c.bookId, c.chapterIndex LIMIT :limit")
     suspend fun getChaptersNeedingSearchIndex(limit: Int): List<ChapterEntity>
 

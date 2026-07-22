@@ -17,14 +17,14 @@ val hasReleaseSigning = listOf(
 
 android {
     namespace = "com.storybrain.app"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.storybrain.app"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 10
-        versionName = "0.4.1"
+        targetSdk = 35
+        versionCode = 11
+        versionName = "0.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -90,6 +90,8 @@ dependencies {
     ksp(libs.room.compiler)
 
     implementation(libs.work.runtime)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.session)
     implementation(libs.datastore.preferences)
     implementation(libs.okhttp)
 

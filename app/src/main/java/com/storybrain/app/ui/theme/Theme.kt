@@ -14,14 +14,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 private val LightColors = lightColorScheme(
-    primary = Color(0xFF65558F),
+    primary = Color(0xFF5E4E82),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE9DDFF),
-    secondary = Color(0xFF006B5F),
-    secondaryContainer = Color(0xFF9EF2E1),
-    background = Color(0xFFF9F7FC),
-    surface = Color(0xFFFFFBFF),
-    surfaceVariant = Color(0xFFE8E0EB)
+    primaryContainer = Color(0xFFE9DFF8),
+    secondary = Color(0xFF4F635A),
+    secondaryContainer = Color(0xFFD2E8DD),
+    background = Color(0xFFF7F4EE),
+    surface = Color(0xFFFFFCF7),
+    surfaceVariant = Color(0xFFEAE4DC)
 )
 
 private val DarkColors = darkColorScheme(
@@ -30,9 +30,9 @@ private val DarkColors = darkColorScheme(
     primaryContainer = Color(0xFF4D3D75),
     secondary = Color(0xFF82D5C5),
     secondaryContainer = Color(0xFF154F48),
-    background = Color(0xFF141218),
-    surface = Color(0xFF1C1B1F),
-    surfaceVariant = Color(0xFF49454F)
+    background = Color(0xFF17151A),
+    surface = Color(0xFF211E24),
+    surfaceVariant = Color(0xFF49444D)
 )
 
 private val StoryShapes = Shapes(

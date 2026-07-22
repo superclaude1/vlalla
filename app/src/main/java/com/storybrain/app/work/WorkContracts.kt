@@ -13,10 +13,12 @@ object WorkContracts {
 
     const val TAG_ANALYSIS = "story-analysis"
     const val TAG_TTS = "chapter-tts"
+    const val TAG_SEARCH_INDEX = "chapter-search-index"
     const val MAINTENANCE_WORK = "maintenance:startup"
 
     fun analysisName(bookId: String) = "analysis:$bookId"
     fun ttsName(chapterId: String) = "tts:$chapterId"
+    fun searchIndexName(bookId: String) = "search-index:$bookId"
 
     fun progress(completed: Int, total: Int, stage: String): Data = Data.Builder()
         .putInt(KEY_COMPLETED, completed)

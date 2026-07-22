@@ -19,6 +19,7 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeLibraryItems() = dao.observeLibraryItems()
     fun observeBook(bookId: String) = dao.observeBook(bookId)
     fun observeChapters(bookId: String) = dao.observeChapters(bookId)
+    fun observeChapterList(bookId: String) = dao.observeChapterList(bookId)
     fun observeChapter(chapterId: String) = dao.observeChapter(chapterId)
     fun observeCharacters(bookId: String) = dao.observeCharacters(bookId)
     fun observeRelations(bookId: String) = dao.observeRelations(bookId)
@@ -31,11 +32,22 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeTtsVoicePool(profileId: String) = dao.observeTtsVoicePool(profileId)
     fun observeBookTtsSetting(bookId: String) = dao.observeBookTtsSetting(bookId)
     fun observeActiveCharacterVoiceBindings(bookId: String) = dao.observeActiveCharacterVoiceBindings(bookId)
+    fun observeReadingPreference(bookId: String) = dao.observeReadingPreference(bookId)
+    fun observeReadingPosition(bookId: String) = dao.observeReadingPosition(bookId)
+    fun observeReadingMarks(bookId: String) = dao.observeReadingMarks(bookId)
+    fun observeChapterReadingMarks(chapterId: String) = dao.observeChapterReadingMarks(chapterId)
+    fun observeTaskRecords(cutoff: Long) = dao.observeTaskRecords(cutoff)
+    fun observeTaskRecord(workName: String) = dao.observeTaskRecord(workName)
 
     suspend fun getBook(bookId: String) = dao.getBook(bookId)
     suspend fun getBooks() = dao.getBooks()
     suspend fun getChapter(chapterId: String) = dao.getChapter(chapterId)
     suspend fun getChapters(bookId: String) = dao.getChapters(bookId)
+    suspend fun getChapterByIndex(bookId: String, chapterIndex: Int) = dao.getChapterByIndex(bookId, chapterIndex)
+    suspend fun getReadingPreference(bookId: String) = dao.getReadingPreference(bookId)
+    suspend fun getReadingPosition(bookId: String) = dao.getReadingPosition(bookId)
+    suspend fun getTaskRecord(workName: String) = dao.getTaskRecord(workName)
+    suspend fun getActiveTaskRecords() = dao.getActiveTaskRecords()
     suspend fun getAllChapterIds() = dao.getAllChapterIds()
     suspend fun getActiveAnalysisTasks() = dao.getActiveAnalysisTasks()
     suspend fun getActiveTtsTasks() = dao.getActiveTtsTasks()
@@ -76,12 +88,139 @@ class StoryRepository(private val database: AppDatabase) {
                 )
             )
             chapterEntities.chunked(100).forEach { dao.insertChapters(it) }
+            chapterEntities.chunked(50).forEach { chapters ->
+                dao.insertChapterSearchIndexes(chapters.map(::chapterSearchIndex))
+            }
         }
         return bookId
     }
 
     suspend fun updateReadingProgress(bookId: String, chapterIndex: Int) =
         dao.updateReadingProgress(bookId, chapterIndex)
+
+    suspend fun saveReadingPreference(preference: ReadingPreferenceEntity) =
+        dao.upsertReadingPreference(preference.copy(updatedAt = System.currentTimeMillis()))
+
+    suspend fun resetReadingStyle(bookId: String) {
+        val existing = dao.getReadingPreference(bookId) ?: ReadingPreferenceEntity(bookId)
+        dao.upsertReadingPreference(existing.copy(useGlobalStyle = true, updatedAt = System.currentTimeMillis()))
+    }
+
+    suspend fun saveReadingPosition(position: ReadingPositionEntity) = database.withTransaction {
+        val chapter = dao.getChapter(position.chapterId) ?: return@withTransaction
+        require(chapter.bookId == position.bookId) { "Reading position chapter does not belong to book" }
+        dao.upsertReadingPosition(
+            position.copy(
+                sourceOffset = position.sourceOffset.coerceIn(0, chapter.content.length),
+                scrollOffsetPx = position.scrollOffsetPx.coerceAtLeast(0),
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        dao.updateReadingProgress(position.bookId, chapter.chapterIndex)
+    }
+
+    suspend fun saveReadingMark(mark: ReadingMarkEntity) {
+        val chapter = dao.getChapter(mark.chapterId) ?: error("Chapter not found")
+        require(chapter.bookId == mark.bookId) { "Reading mark chapter does not belong to book" }
+        val start = mark.startOffset.coerceIn(0, chapter.content.length)
+        val end = mark.endOffset.coerceIn(start, chapter.content.length)
+        dao.upsertReadingMark(
+            mark.copy(
+                startOffset = start,
+                endOffset = end,
+                excerpt = mark.excerpt.trim().take(500),
+                note = mark.note.trim().take(2_000),
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+    }
+
+    suspend fun deleteReadingMark(markId: String) = dao.deleteReadingMark(markId)
+
+    suspend fun searchBook(bookId: String, query: String, limit: Int = 100): List<ChapterSearchHit> {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return emptyList()
+        val matchQuery = MemorySearch.matchQuery(cleanQuery)
+        if (matchQuery.isBlank()) return emptyList()
+        return dao.searchChapters(bookId, matchQuery, limit).flatMap { chapter ->
+            val hits = mutableListOf<ChapterSearchHit>()
+            var from = 0
+            while (hits.size < 3) {
+                val offset = chapter.content.indexOf(cleanQuery, from, ignoreCase = true)
+                if (offset < 0) break
+                val excerptStart = (offset - 35).coerceAtLeast(0)
+                val excerptEnd = (offset + cleanQuery.length + 55).coerceAtMost(chapter.content.length)
+                hits += ChapterSearchHit(
+                    chapterId = chapter.id,
+                    chapterIndex = chapter.chapterIndex,
+                    chapterTitle = chapter.title,
+                    sourceOffset = offset,
+                    excerpt = chapter.content.substring(excerptStart, excerptEnd).replace('\n', ' ').trim()
+                )
+                from = offset + cleanQuery.length.coerceAtLeast(1)
+            }
+            hits
+        }.take(limit)
+    }
+
+    suspend fun countChaptersNeedingSearchIndex() = dao.countChaptersNeedingSearchIndex()
+
+    suspend fun countBookChaptersNeedingSearchIndex(bookId: String) =
+        dao.countBookChaptersNeedingSearchIndex(bookId)
+
+    suspend fun indexNextChapters(limit: Int = 20): Int = database.withTransaction {
+        val chapters = dao.getChaptersNeedingSearchIndex(limit)
+        chapters.forEach { chapter ->
+            dao.deleteChapterSearchIndex(chapter.id)
+            dao.insertChapterSearchIndex(chapterSearchIndex(chapter))
+        }
+        chapters.size
+    }
+
+    suspend fun indexNextBookChapters(bookId: String, limit: Int = 20): Int = database.withTransaction {
+        val chapters = dao.getBookChaptersNeedingSearchIndex(bookId, limit)
+        chapters.forEach { chapter ->
+            dao.deleteChapterSearchIndex(chapter.id)
+            dao.insertChapterSearchIndex(chapterSearchIndex(chapter))
+        }
+        chapters.size
+    }
+
+    suspend fun reindexChapter(chapterId: String) = database.withTransaction {
+        val chapter = dao.getChapter(chapterId) ?: return@withTransaction
+        dao.deleteChapterSearchIndex(chapterId)
+        dao.insertChapterSearchIndex(chapterSearchIndex(chapter))
+    }
+
+    suspend fun upsertTaskRecord(record: TaskRecordEntity) = dao.upsertTaskRecord(record)
+
+    suspend fun updateTaskRecord(
+        workName: String,
+        status: TaskStatus,
+        completed: Int? = null,
+        total: Int? = null,
+        stage: String? = null,
+        errorCode: String? = null,
+        errorMessage: String? = null
+    ) {
+        val existing = dao.getTaskRecord(workName) ?: return
+        val now = System.currentTimeMillis()
+        dao.upsertTaskRecord(
+            existing.copy(
+                status = status.name,
+                completed = completed ?: existing.completed,
+                total = total ?: existing.total,
+                stage = stage?.take(120) ?: existing.stage,
+                errorCode = errorCode,
+                errorMessage = errorMessage?.take(400),
+                updatedAt = now,
+                finishedAt = if (status in setOf(TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)) now else null
+            )
+        )
+    }
+
+    suspend fun deleteOldTaskRecords(cutoff: Long) = dao.deleteOldTaskRecords(cutoff)
+    suspend fun clearFinishedTaskRecords() = dao.clearFinishedTaskRecords()
 
     suspend fun updateTtsStatus(chapterId: String, status: TaskStatus) =
         dao.updateTtsStatus(chapterId, status.name)
@@ -485,6 +624,7 @@ class StoryRepository(private val database: AppDatabase) {
     }
 
     suspend fun deleteBook(bookId: String) = database.withTransaction {
+        dao.deleteChapterSearchIndexForBook(bookId)
         dao.deleteMemoryFtsForBook(bookId)
         dao.deleteRelationsForBook(bookId)
         dao.deletePlotNodesForBook(bookId)
@@ -494,6 +634,14 @@ class StoryRepository(private val database: AppDatabase) {
     private fun stableMemoryId(sourceKey: String): String = UUID.nameUUIDFromBytes(
         sourceKey.toByteArray(StandardCharsets.UTF_8)
     ).toString()
+
+    private fun chapterSearchIndex(chapter: ChapterEntity) = ChapterSearchFtsEntity(
+        chapterId = chapter.id,
+        bookId = chapter.bookId,
+        title = chapter.title,
+        content = chapter.content,
+        searchTerms = MemorySearch.terms(chapter.title, chapter.content)
+    )
 
     companion object {
         const val MAX_SELECTED_MEMORIES = 30

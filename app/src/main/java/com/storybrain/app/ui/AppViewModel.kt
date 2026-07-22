@@ -2,6 +2,7 @@ package com.storybrain.app.ui
 
 import android.app.Application
 import android.net.Uri
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.storybrain.app.StoryBrainApplication
@@ -16,7 +17,6 @@ import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.export.Neo4jExporter
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.TtsSettingsStore
-import com.storybrain.app.tts.ChapterAudioPlayer
 import com.storybrain.app.tts.ChapterTtsEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,7 +74,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val ttsSettings = TtsSettingsStore(application)
     private val ttsEngine = ChapterTtsEngine(application, repository, ttsSettings)
     private val longTasks = (application as StoryBrainApplication).longTaskScheduler
-    private val audioPlayer = ChapterAudioPlayer()
+    private val playback = (application as StoryBrainApplication).playbackRepository
     private val _analysisState = MutableStateFlow(AnalysisUiState())
     val analysisState = _analysisState.asStateFlow()
     private val _characterChatState = MutableStateFlow(CharacterChatUiState())
@@ -202,7 +202,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun generateChapterTts(bookId: String, chapterId: String) {
         viewModelScope.launch {
-            audioPlayer.stop()
+            playback.pause()
             runCatching { longTasks.enqueueTts(bookId, chapterId) }
                 .onSuccess {
                     _ttsState.value = TtsUiState(chapterId = chapterId, message = "配音任务已加入后台队列")
@@ -223,19 +223,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun playChapterTts(chapterId: String, manifestPath: String) {
-        audioPlayer.play(manifestPath) { playing, error ->
+    fun playChapterTts(chapterId: String, @Suppress("UNUSED_PARAMETER") manifestPath: String) {
+        viewModelScope.launch {
+            val chapter = repository.getChapter(chapterId)
+            val result = chapter?.let { playback.playChapter(it.bookId, it.id) }
+                ?: Result.failure(IllegalArgumentException("找不到章节"))
             _ttsState.value = TtsUiState(
                 chapterId = chapterId,
-                playing = playing,
-                message = error ?: if (playing) "正在播放本章配音" else "播放完成",
-                isError = error != null
+                playing = result.isSuccess,
+                message = result.exceptionOrNull()?.message ?: "正在播放本章配音",
+                isError = result.isFailure
             )
         }
     }
 
     fun stopChapterTts() {
-        audioPlayer.stop()
+        playback.pause()
         _ttsState.value = _ttsState.value.copy(playing = false, message = "已停止播放")
     }
 
@@ -269,7 +272,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching {
                 val chapterIds = repository.getChapters(bookId).map { it.id }
-                audioPlayer.stop()
+                playback.stopIfBook(bookId)
                 longTasks.cancelBook(bookId, chapterIds)
                 repository.deleteBook(bookId)
                 withContext(Dispatchers.IO) { ttsEngine.deleteAudio(chapterIds) }
@@ -291,7 +294,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     var seededNow = false
                     if (!memoryPreferences.getBoolean(seededKey, false)) {
                         repository.seedCharacterDefaults(bookId, characterId)
-                        memoryPreferences.edit().putBoolean(seededKey, true).apply()
+                        memoryPreferences.edit { putBoolean(seededKey, true) }
                         seededNow = true
                     }
                     repository.getOrCreateSession(bookId, characterId).id to seededNow
@@ -488,8 +491,4 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    override fun onCleared() {
-        audioPlayer.stop()
-        super.onCleared()
-    }
 }

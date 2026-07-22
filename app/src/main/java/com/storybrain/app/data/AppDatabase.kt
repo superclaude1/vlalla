@@ -26,9 +26,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CharacterVoiceBindingEntity::class,
         BookNarratorBindingEntity::class,
         TtsScriptEntity::class,
-        TtsScriptSegmentEntity::class
+        TtsScriptSegmentEntity::class,
+        ReadingPreferenceEntity::class,
+        ReadingPositionEntity::class,
+        ReadingMarkEntity::class,
+        TaskRecordEntity::class,
+        ChapterSearchFtsEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -39,7 +44,7 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "story-brain.db"
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -157,6 +162,36 @@ abstract class AppDatabase : RoomDatabase() {
                         arrayOf("edge-default", row[0], row[2], row[1], row[3])
                     )
                 }
+            }
+        }
+
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_preferences` (`bookId` TEXT NOT NULL, `mode` TEXT NOT NULL, `useGlobalStyle` INTEGER NOT NULL, `theme` TEXT NOT NULL, `fontSizeSp` REAL NOT NULL, `lineHeightMultiplier` REAL NOT NULL, `paragraphSpacingDp` REAL NOT NULL, `horizontalPaddingDp` INTEGER NOT NULL, `serifFont` INTEGER NOT NULL, `autoFollowAudio` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`bookId`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_positions` (`bookId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `sourceOffset` INTEGER NOT NULL, `scrollOffsetPx` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`bookId`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_positions_chapterId` ON `reading_positions` (`chapterId`)")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_marks` (`id` TEXT NOT NULL, `bookId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `type` TEXT NOT NULL, `startOffset` INTEGER NOT NULL, `endOffset` INTEGER NOT NULL, `excerpt` TEXT NOT NULL, `note` TEXT NOT NULL, `colorKey` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_bookId` ON `reading_marks` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_chapterId` ON `reading_marks` (`chapterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_bookId_type` ON `reading_marks` (`bookId`,`type`)")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `task_records` (`workName` TEXT NOT NULL, `type` TEXT NOT NULL, `bookId` TEXT NOT NULL, `chapterId` TEXT, `title` TEXT NOT NULL, `status` TEXT NOT NULL, `completed` INTEGER NOT NULL, `total` INTEGER NOT NULL, `stage` TEXT NOT NULL, `errorCode` TEXT, `errorMessage` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `finishedAt` INTEGER, PRIMARY KEY(`workName`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_records_bookId` ON `task_records` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_records_chapterId` ON `task_records` (`chapterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_records_status` ON `task_records` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_records_updatedAt` ON `task_records` (`updatedAt`)")
+                db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS `chapter_search_fts` USING FTS4(`chapterId`, `bookId`, `title`, `content`, `searchTerms`)")
+
+                db.execSQL(
+                    """INSERT OR IGNORE INTO `reading_positions` (`bookId`,`chapterId`,`sourceOffset`,`scrollOffsetPx`,`updatedAt`) SELECT b.`id`, c.`id`, 0, 0, b.`importedAt` FROM `books` b JOIN `chapters` c ON c.`bookId` = b.`id` AND c.`chapterIndex` = b.`currentChapterIndex`"""
+                )
             }
         }
     }

@@ -1,12 +1,15 @@
 package com.storybrain.app.work
 
 import android.content.Context
+import androidx.core.content.edit
 import androidx.work.CoroutineWorker
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.storybrain.app.StoryBrainApplication
+import com.storybrain.app.data.TaskRecordEntity
 import com.storybrain.app.data.TaskStatus
+import com.storybrain.app.data.TaskType
 import com.storybrain.app.tts.ChapterTtsEngine
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -20,16 +23,69 @@ class MaintenanceWorker(context: Context, params: WorkerParameters) : CoroutineW
             repository.ensureDefaultTtsProfiles()
             ChapterTtsEngine(applicationContext, repository).recoverAndCleanup(repository.getAllChapterIds().toSet())
 
+            repository.deleteOldTaskRecords(System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7))
+
             repository.getActiveAnalysisTasks().groupBy { it.bookId }.forEach { (bookId, tasks) ->
-                if (!manager.hasActiveWork(WorkContracts.analysisName(bookId))) {
+                val workName = WorkContracts.analysisName(bookId)
+                if (!manager.hasActiveWork(workName)) {
                     repository.updateAnalysisStatus(tasks.map { it.id }, TaskStatus.FAILED)
+                    repository.updateTaskRecord(workName, TaskStatus.FAILED, stage = "任务已中断，可重试")
+                } else if (repository.getTaskRecord(workName) == null) {
+                    val book = repository.getBook(bookId) ?: return@forEach
+                    repository.upsertTaskRecord(
+                        TaskRecordEntity(
+                            workName = workName,
+                            type = TaskType.ANALYSIS.name,
+                            bookId = bookId,
+                            title = "分析《${book.title}》",
+                            status = TaskStatus.RUNNING.name,
+                            total = tasks.size,
+                            stage = "正在恢复任务"
+                        )
+                    )
                 }
             }
             repository.getActiveTtsTasks().forEach { task ->
-                if (!manager.hasActiveWork(WorkContracts.ttsName(task.id))) {
+                val workName = WorkContracts.ttsName(task.id)
+                if (!manager.hasActiveWork(workName)) {
                     val chapter = repository.getChapter(task.id)
                     val hasManifest = chapter?.ttsManifestPath?.let(::File)?.exists() == true
                     repository.updateTtsStatus(task.id, if (hasManifest) TaskStatus.COMPLETED else TaskStatus.FAILED)
+                    repository.updateTaskRecord(
+                        workName,
+                        if (hasManifest) TaskStatus.COMPLETED else TaskStatus.FAILED,
+                        stage = if (hasManifest) "配音已恢复" else "任务已中断，可重试"
+                    )
+                } else if (repository.getTaskRecord(workName) == null) {
+                    val chapter = repository.getChapter(task.id) ?: return@forEach
+                    val book = repository.getBook(task.bookId) ?: return@forEach
+                    repository.upsertTaskRecord(
+                        TaskRecordEntity(
+                            workName = workName,
+                            type = TaskType.TTS.name,
+                            bookId = task.bookId,
+                            chapterId = task.id,
+                            title = "《${book.title}》· ${chapter.title}",
+                            status = TaskStatus.RUNNING.name,
+                            stage = "正在恢复任务"
+                        )
+                    )
+                }
+            }
+
+            repository.getActiveTaskRecords().forEach { record ->
+                if (!manager.hasActiveWork(record.workName)) {
+                    repository.updateTaskRecord(record.workName, TaskStatus.FAILED, stage = "任务已中断，可重试")
+                }
+            }
+
+            var scheduledIndexes = 0
+            for (book in repository.getBooks()) {
+                if (scheduledIndexes >= 3) break
+                if (repository.countBookChaptersNeedingSearchIndex(book.id) > 0 &&
+                    app.longTaskScheduler.enqueueSearchIndex(book.id)
+                ) {
+                    scheduledIndexes++
                 }
             }
 
@@ -40,7 +96,7 @@ class MaintenanceWorker(context: Context, params: WorkerParameters) : CoroutineW
                 runCatching { repository.backfillAnalysisMemories(book.id) }
                     .onSuccess { completed += book.id }
             }
-            preferences.edit().putStringSet("memory_backfill_books", completed).apply()
+            preferences.edit { putStringSet("memory_backfill_books", completed) }
             LocalDiagnostics.event("maintenance_completed")
             Result.success()
         }.getOrElse { error ->

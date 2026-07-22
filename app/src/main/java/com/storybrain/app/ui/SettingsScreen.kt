@@ -35,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -54,12 +55,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.storybrain.app.BuildConfig
 import com.storybrain.app.data.TtsProviderKind
 import com.storybrain.app.data.TtsVoiceRole
+import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.settings.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onOpenLibrary: () -> Unit, viewModel: SettingsViewModel = viewModel()) {
+fun SettingsScreen(
+    viewModel: SettingsViewModel = viewModel(),
+    readerViewModel: ReaderDefaultsViewModel = viewModel()
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val readerDefaults by readerViewModel.preferences.collectAsStateWithLifecycle()
     val selectedProfile = state.profiles.firstOrNull { it.id == state.selectedProfileId }
     val selectedKind = selectedProfile?.kind?.let { runCatching { TtsProviderKind.valueOf(it) }.getOrNull() }
     var llmModelsOpen by remember { mutableStateOf(false) }
@@ -72,8 +78,7 @@ fun SettingsScreen(onOpenLibrary: () -> Unit, viewModel: SettingsViewModel = vie
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("设置") },
-                navigationIcon = { IconButton(onClick = onOpenLibrary) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } }
+                title = { Text("设置") }
             )
         }
     ) { padding ->
@@ -82,6 +87,70 @@ fun SettingsScreen(onOpenLibrary: () -> Unit, viewModel: SettingsViewModel = vie
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            item { SectionHeader("阅读与播放", "新打开的小说默认使用这些排版设置；每本书仍可单独覆盖。") }
+            item {
+                Card {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("阅读主题", fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ReaderTheme.entries.forEach { theme ->
+                                FilterChip(
+                                    selected = readerDefaults.theme == theme,
+                                    onClick = { readerViewModel.save(readerDefaults.copy(theme = theme)) },
+                                    label = { Text(when (theme) {
+                                        ReaderTheme.PAPER -> "纸白"
+                                        ReaderTheme.SEPIA -> "羊皮纸"
+                                        ReaderTheme.NIGHT -> "夜间"
+                                    }) }
+                                )
+                            }
+                        }
+                        Text("默认字号 ${readerDefaults.fontSizeSp.toInt()}")
+                        Slider(
+                            value = readerDefaults.fontSizeSp,
+                            onValueChange = { readerViewModel.save(readerDefaults.copy(fontSizeSp = it)) },
+                            valueRange = 14f..30f,
+                            steps = 15
+                        )
+                        Text("默认行距 ${"%.1f".format(readerDefaults.lineHeightMultiplier)}")
+                        Slider(
+                            value = readerDefaults.lineHeightMultiplier,
+                            onValueChange = { readerViewModel.save(readerDefaults.copy(lineHeightMultiplier = it)) },
+                            valueRange = 1.2f..2.2f,
+                            steps = 9
+                        )
+                        Text("默认段距 ${readerDefaults.paragraphSpacingDp.toInt()} dp")
+                        Slider(
+                            value = readerDefaults.paragraphSpacingDp,
+                            onValueChange = { readerViewModel.save(readerDefaults.copy(paragraphSpacingDp = it)) },
+                            valueRange = 0f..24f,
+                            steps = 11
+                        )
+                        Text("默认页边距 ${readerDefaults.horizontalPaddingDp} dp")
+                        Slider(
+                            value = readerDefaults.horizontalPaddingDp.toFloat(),
+                            onValueChange = { readerViewModel.save(readerDefaults.copy(horizontalPaddingDp = it.toInt())) },
+                            valueRange = 12f..40f,
+                            steps = 13
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = readerDefaults.serifFont,
+                                onCheckedChange = { readerViewModel.save(readerDefaults.copy(serifFont = it)) }
+                            )
+                            Text("原文默认使用衬线字体")
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = readerDefaults.autoFollowAudio,
+                                onCheckedChange = { readerViewModel.save(readerDefaults.copy(autoFollowAudio = it)) }
+                            )
+                            Text("听书时自动跟随当前段落")
+                        }
+                    }
+                }
+            }
+            item { SectionHeader("AI 与配音服务", "以下为高级服务配置，密钥只保存在本机。") }
             item { SectionHeader("LLM 分析服务", "用于小说分析、角色对话和章节演绎标注，支持 OpenAI-compatible 接口。") }
             item {
                 Card { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {

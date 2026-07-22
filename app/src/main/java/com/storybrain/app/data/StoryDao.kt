@@ -30,6 +30,9 @@ interface StoryDao {
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY chapterIndex")
     fun observeChapters(bookId: String): Flow<List<ChapterEntity>>
 
+    @Query("SELECT id, bookId, chapterIndex, title, charCount, analysisStatus, ttsStatus, ttsManifestPath FROM chapters WHERE bookId = :bookId ORDER BY chapterIndex")
+    fun observeChapterList(bookId: String): Flow<List<ChapterListItem>>
+
     @Query("SELECT * FROM chapters WHERE id = :chapterId")
     fun observeChapter(chapterId: String): Flow<ChapterEntity?>
 
@@ -44,6 +47,90 @@ interface StoryDao {
 
     @Query("SELECT * FROM chapters WHERE bookId = :bookId ORDER BY chapterIndex")
     suspend fun getChapters(bookId: String): List<ChapterEntity>
+
+    @Query("SELECT * FROM chapters WHERE bookId = :bookId AND chapterIndex = :chapterIndex LIMIT 1")
+    suspend fun getChapterByIndex(bookId: String, chapterIndex: Int): ChapterEntity?
+
+    @Query("SELECT * FROM reading_preferences WHERE bookId = :bookId")
+    fun observeReadingPreference(bookId: String): Flow<ReadingPreferenceEntity?>
+
+    @Query("SELECT * FROM reading_preferences WHERE bookId = :bookId")
+    suspend fun getReadingPreference(bookId: String): ReadingPreferenceEntity?
+
+    @Upsert
+    suspend fun upsertReadingPreference(preference: ReadingPreferenceEntity)
+
+    @Query("DELETE FROM reading_preferences WHERE bookId = :bookId")
+    suspend fun deleteReadingPreference(bookId: String)
+
+    @Query("SELECT * FROM reading_positions WHERE bookId = :bookId")
+    fun observeReadingPosition(bookId: String): Flow<ReadingPositionEntity?>
+
+    @Query("SELECT * FROM reading_positions WHERE bookId = :bookId")
+    suspend fun getReadingPosition(bookId: String): ReadingPositionEntity?
+
+    @Upsert
+    suspend fun upsertReadingPosition(position: ReadingPositionEntity)
+
+    @Query("SELECT * FROM reading_marks WHERE bookId = :bookId ORDER BY updatedAt DESC")
+    fun observeReadingMarks(bookId: String): Flow<List<ReadingMarkEntity>>
+
+    @Query("SELECT * FROM reading_marks WHERE chapterId = :chapterId ORDER BY startOffset, updatedAt")
+    fun observeChapterReadingMarks(chapterId: String): Flow<List<ReadingMarkEntity>>
+
+    @Upsert
+    suspend fun upsertReadingMark(mark: ReadingMarkEntity)
+
+    @Query("DELETE FROM reading_marks WHERE id = :markId")
+    suspend fun deleteReadingMark(markId: String)
+
+    @Query("SELECT * FROM task_records WHERE status IN ('QUEUED','RUNNING') OR finishedAt IS NULL OR finishedAt >= :cutoff ORDER BY CASE WHEN status IN ('QUEUED','RUNNING') THEN 0 ELSE 1 END, updatedAt DESC")
+    fun observeTaskRecords(cutoff: Long): Flow<List<TaskRecordEntity>>
+
+    @Query("SELECT * FROM task_records WHERE workName = :workName")
+    suspend fun getTaskRecord(workName: String): TaskRecordEntity?
+
+    @Query("SELECT * FROM task_records WHERE workName = :workName")
+    fun observeTaskRecord(workName: String): Flow<TaskRecordEntity?>
+
+    @Query("SELECT * FROM task_records WHERE status IN ('QUEUED','RUNNING')")
+    suspend fun getActiveTaskRecords(): List<TaskRecordEntity>
+
+    @Upsert
+    suspend fun upsertTaskRecord(record: TaskRecordEntity)
+
+    @Query("DELETE FROM task_records WHERE status IN ('COMPLETED','FAILED','CANCELLED') AND finishedAt < :cutoff")
+    suspend fun deleteOldTaskRecords(cutoff: Long)
+
+    @Query("DELETE FROM task_records WHERE status IN ('COMPLETED','FAILED','CANCELLED')")
+    suspend fun clearFinishedTaskRecords()
+
+    @Query("SELECT c.* FROM chapters c JOIN chapter_search_fts f ON f.chapterId = c.id WHERE chapter_search_fts MATCH :matchQuery AND c.bookId = :bookId ORDER BY c.chapterIndex LIMIT :limit")
+    suspend fun searchChapters(bookId: String, matchQuery: String, limit: Int): List<ChapterEntity>
+
+    @Query("SELECT * FROM chapters c WHERE NOT EXISTS (SELECT 1 FROM chapter_search_fts f WHERE f.chapterId = c.id) ORDER BY c.bookId, c.chapterIndex LIMIT :limit")
+    suspend fun getChaptersNeedingSearchIndex(limit: Int): List<ChapterEntity>
+
+    @Query("SELECT COUNT(*) FROM chapters c WHERE NOT EXISTS (SELECT 1 FROM chapter_search_fts f WHERE f.chapterId = c.id)")
+    suspend fun countChaptersNeedingSearchIndex(): Int
+
+    @Query("SELECT * FROM chapters c WHERE c.bookId = :bookId AND NOT EXISTS (SELECT 1 FROM chapter_search_fts f WHERE f.chapterId = c.id) ORDER BY c.chapterIndex LIMIT :limit")
+    suspend fun getBookChaptersNeedingSearchIndex(bookId: String, limit: Int): List<ChapterEntity>
+
+    @Query("SELECT COUNT(*) FROM chapters c WHERE c.bookId = :bookId AND NOT EXISTS (SELECT 1 FROM chapter_search_fts f WHERE f.chapterId = c.id)")
+    suspend fun countBookChaptersNeedingSearchIndex(bookId: String): Int
+
+    @Query("DELETE FROM chapter_search_fts WHERE chapterId = :chapterId")
+    suspend fun deleteChapterSearchIndex(chapterId: String)
+
+    @Insert
+    suspend fun insertChapterSearchIndex(index: ChapterSearchFtsEntity)
+
+    @Insert
+    suspend fun insertChapterSearchIndexes(indexes: List<ChapterSearchFtsEntity>)
+
+    @Query("DELETE FROM chapter_search_fts WHERE bookId = :bookId")
+    suspend fun deleteChapterSearchIndexForBook(bookId: String)
 
     @Query("SELECT id FROM chapters")
     suspend fun getAllChapterIds(): List<String>

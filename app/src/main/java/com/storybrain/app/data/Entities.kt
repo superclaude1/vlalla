@@ -53,6 +53,18 @@ data class ChapterEntity(
     val ttsManifestPath: String? = null
 )
 
+/** Lightweight chapter navigation row that deliberately excludes full chapter content. */
+data class ChapterListItem(
+    val id: String,
+    val bookId: String,
+    val chapterIndex: Int,
+    val title: String,
+    val charCount: Int,
+    val analysisStatus: String,
+    val ttsStatus: String,
+    val ttsManifestPath: String?
+)
+
 @Entity(
     tableName = "characters",
     foreignKeys = [ForeignKey(

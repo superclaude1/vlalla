@@ -4,4 +4,5 @@
     <exclude domain="sharedpref" path="secure_tts_credentials_v2.xml" />
     <exclude domain="sharedpref" path="maintenance_v1.xml" />
     <exclude domain="file" path="tts/" />
+    <exclude domain="file" path="datastore/playback_state_v5.preferences_pb" />
 </full-backup-content>

@@ -2,9 +2,21 @@ package com.storybrain.app.reader
 
 sealed interface ReadingBlock {
     val text: String
+    val sourceStart: Int
+    val sourceEnd: Int
 
-    data class Narration(override val text: String) : ReadingBlock
-    data class Dialogue(val speaker: String, override val text: String) : ReadingBlock
+    data class Narration(
+        override val text: String,
+        override val sourceStart: Int = 0,
+        override val sourceEnd: Int = sourceStart + text.length
+    ) : ReadingBlock
+
+    data class Dialogue(
+        val speaker: String,
+        override val text: String,
+        override val sourceStart: Int = 0,
+        override val sourceEnd: Int = sourceStart + text.length
+    ) : ReadingBlock
 }
 
 object TextToChatParser {
@@ -23,7 +35,9 @@ object TextToChatParser {
         quote.findAll(text).forEach { match ->
             if (match.range.first > cursor) {
                 val narration = text.substring(cursor, match.range.first)
-                splitNarration(narration).forEach { blocks += ReadingBlock.Narration(it) }
+                splitNarration(narration, cursor).forEach {
+                    blocks += ReadingBlock.Narration(it.text, it.sourceStart, it.sourceEnd)
+                }
             }
             val beforeStart = (match.range.first - 80).coerceAtLeast(0)
             val afterEnd = (match.range.last + 81).coerceAtMost(text.length)
@@ -36,11 +50,24 @@ object TextToChatParser {
                 ?: guessed
                 ?: lastKnownSpeaker
             if (speaker != "未识别角色") lastKnownSpeaker = speaker
-            blocks += ReadingBlock.Dialogue(speaker, match.groupValues[1].trim())
+            val group = match.groups[1]
+            val rawDialogue = match.groupValues[1]
+            val leadingWhitespace = rawDialogue.indexOfFirst { !it.isWhitespace() }.coerceAtLeast(0)
+            val trailingExclusive = rawDialogue.indexOfLast { !it.isWhitespace() }
+                .let { if (it < 0) leadingWhitespace else it + 1 }
+            val groupStart = group?.range?.first ?: match.range.first
+            blocks += ReadingBlock.Dialogue(
+                speaker = speaker,
+                text = rawDialogue.trim(),
+                sourceStart = groupStart + leadingWhitespace,
+                sourceEnd = groupStart + trailingExclusive
+            )
             cursor = match.range.last + 1
         }
         if (cursor < text.length) {
-            splitNarration(text.substring(cursor)).forEach { blocks += ReadingBlock.Narration(it) }
+            splitNarration(text.substring(cursor), cursor).forEach {
+                blocks += ReadingBlock.Narration(it.text, it.sourceStart, it.sourceEnd)
+            }
         }
         return blocks.filter { it.text.isNotBlank() }
     }
@@ -83,29 +110,28 @@ object TextToChatParser {
         return best?.second
     }
 
-    private fun splitNarration(raw: String, targetLength: Int = 100): List<String> {
-        val compact = raw.replace(Regex("[\\t ]+"), " ").replace(Regex("\\n{3,}"), "\n\n").trim()
-        if (compact.isBlank()) return emptyList()
-        val sentences = compact.split(Regex("(?<=[。！？!?；;])|\\n{2,}"))
-            .map { it.trim() }.filter { it.isNotBlank() }
-        val output = mutableListOf<String>()
-        var current = StringBuilder()
-        for (sentence in sentences) {
-            if (current.isNotEmpty() && current.length + sentence.length > targetLength) {
-                output += current.toString()
-                current = StringBuilder()
+    private data class TextSlice(val text: String, val sourceStart: Int, val sourceEnd: Int)
+
+    private fun splitNarration(raw: String, rawStart: Int, targetLength: Int = 100): List<TextSlice> {
+        if (raw.isBlank()) return emptyList()
+        val output = mutableListOf<TextSlice>()
+        var chunkStart = 0
+        while (chunkStart < raw.length) {
+            while (chunkStart < raw.length && raw[chunkStart].isWhitespace()) chunkStart++
+            if (chunkStart >= raw.length) break
+            var chunkEnd = (chunkStart + targetLength).coerceAtMost(raw.length)
+            if (chunkEnd < raw.length) {
+                val boundary = raw.indexOfAny(charArrayOf('。', '！', '？', '!', '?', '\n'), chunkEnd)
+                val maximum = (chunkStart + targetLength * 2).coerceAtMost(raw.length)
+                if (boundary in chunkEnd until maximum) chunkEnd = boundary + 1
             }
-            if (sentence.length > targetLength * 2) {
-                if (current.isNotEmpty()) {
-                    output += current.toString()
-                    current = StringBuilder()
-                }
-                sentence.chunked(targetLength).forEach { output += it }
-            } else {
-                current.append(sentence)
+            while (chunkEnd > chunkStart && raw[chunkEnd - 1].isWhitespace()) chunkEnd--
+            if (chunkEnd > chunkStart) {
+                val value = raw.substring(chunkStart, chunkEnd).replace(Regex("[\\t ]+"), " ").trim()
+                if (value.isNotBlank()) output += TextSlice(value, rawStart + chunkStart, rawStart + chunkEnd)
             }
+            chunkStart = chunkEnd.coerceAtLeast(chunkStart + 1)
         }
-        if (current.isNotEmpty()) output += current.toString()
         return output
     }
 }

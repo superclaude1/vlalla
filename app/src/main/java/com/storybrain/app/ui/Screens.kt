@@ -126,8 +126,7 @@ import kotlin.math.sin
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onImportStarted: () -> Unit,
-    onOpenBook: (String) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenBook: (String) -> Unit
 ) {
     val books by viewModel.libraryItems.collectAsStateWithLifecycle(initialValue = emptyList())
     var libraryQuery by rememberSaveable { mutableStateOf("") }
@@ -135,6 +134,9 @@ fun LibraryScreen(
     val visibleBooks = remember(books, libraryQuery, sortByTitle) {
         books.filter { it.book.title.contains(libraryQuery, true) }
             .let { list -> if (sortByTitle) list.sortedBy { it.book.title.lowercase() } else list }
+    }
+    val continueReading = remember(books) {
+        books.firstOrNull { it.book.currentChapterIndex > 0 } ?: books.firstOrNull()
     }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -162,22 +164,7 @@ fun LibraryScreen(
                 }
             )
         },
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = true,
-                    onClick = {},
-                    icon = { Icon(Icons.Rounded.AutoStories, null) },
-                    label = { Text("书架") }
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = onOpenSettings,
-                    icon = { Icon(Icons.Rounded.Settings, null) },
-                    label = { Text("设置") }
-                )
-            }
-        }
+        bottomBar = {}
     ) { padding ->
         if (books.isEmpty()) {
             EmptyLibrary(
@@ -202,6 +189,11 @@ fun LibraryScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+                continueReading?.let { item ->
+                    item(key = "continue-reading") {
+                        ContinueReadingCard(item.book) { onOpenBook(item.book.id) }
+                    }
+                }
                 items(visibleBooks, key = { it.book.id }) { item ->
                     BookCard(
                         book = item.book,
@@ -211,6 +203,34 @@ fun LibraryScreen(
                 }
                 if (visibleBooks.isEmpty()) item { Text("没有匹配的小说", modifier = Modifier.padding(24.dp)) }
             }
+        }
+    }
+}
+
+@Composable
+private fun ContinueReadingCard(book: BookEntity, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    ) {
+        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.story_brain_cover),
+                contentDescription = "${book.title} 封面",
+                modifier = Modifier.size(width = 76.dp, height = 104.dp).clip(RoundedCornerShape(14.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("继续阅读", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(book.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 2)
+                Text("第 ${book.currentChapterIndex + 1} 章 · 共 ${book.chapterCount} 章", style = MaterialTheme.typography.bodySmall)
+                LinearProgressIndicator(
+                    progress = { if (book.chapterCount == 0) 0f else (book.currentChapterIndex + 1f) / book.chapterCount },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Icon(Icons.Rounded.ChevronRight, "继续阅读")
         }
     }
 }
@@ -432,6 +452,14 @@ fun BookScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item {
+                BookHeroHeader(
+                    book = book,
+                    onContinue = {
+                        chapters.getOrNull(book?.currentChapterIndex ?: 0)?.let { onReadChapter(it.id) }
+                    }
+                )
+            }
+            item {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                     Column(Modifier.fillMaxWidth().padding(18.dp)) {
                         Text("故事分析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -568,6 +596,40 @@ fun BookScreen(
                     viewModel.markReading(bookId, chapter.chapterIndex)
                     onReadChapter(chapter.id)
                 })
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookHeroHeader(book: BookEntity?, onContinue: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.story_brain_cover),
+                contentDescription = book?.title?.let { "$it 封面" },
+                modifier = Modifier.size(width = 88.dp, height = 120.dp).clip(RoundedCornerShape(16.dp)),
+                contentScale = ContentScale.Crop
+            )
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(book?.title ?: "小说", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, maxLines = 2)
+                Text(
+                    "${book?.chapterCount ?: 0} 章 · ${formatChars(book?.totalChars ?: 0)}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LinearProgressIndicator(
+                    progress = {
+                        val total = book?.chapterCount ?: 0
+                        if (total <= 0) 0f else ((book?.currentChapterIndex ?: 0) + 1f) / total
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(onClick = onContinue, enabled = book != null, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Rounded.AutoStories, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("继续阅读")
+                }
             }
         }
     }

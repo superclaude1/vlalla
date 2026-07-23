@@ -265,6 +265,9 @@ interface StoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBook(book: BookEntity)
 
+    @Query("UPDATE books SET coverPath = :coverPath WHERE id = :bookId")
+    suspend fun updateBookCoverPath(bookId: String, coverPath: String?)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChapters(chapters: List<ChapterEntity>)
 

@@ -18,6 +18,9 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Error
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -50,7 +53,8 @@ import com.storybrain.app.data.TaskType
 fun TaskScreen(
     viewModel: TaskViewModel,
     onOpenBook: (String) -> Unit,
-    onOpenReader: (String, String) -> Unit
+    onOpenReader: (String, String) -> Unit,
+    onOpenTask: (String) -> Unit
 ) {
     val tasks by viewModel.tasks.collectAsStateWithLifecycle()
     var filter by remember { mutableStateOf<TaskType?>(null) }
@@ -88,6 +92,7 @@ fun TaskScreen(
                     task = task,
                     onCancel = { viewModel.cancel(task) },
                     onRetry = { viewModel.retry(task) },
+                    onDetails = { onOpenTask(task.workName) },
                     onOpen = {
                         task.chapterId?.let { onOpenReader(task.bookId, it) } ?: onOpenBook(task.bookId)
                     }
@@ -98,10 +103,10 @@ fun TaskScreen(
 }
 
 @Composable
-private fun TaskCard(task: TaskRecordEntity, onCancel: () -> Unit, onRetry: () -> Unit, onOpen: () -> Unit) {
+private fun TaskCard(task: TaskRecordEntity, onCancel: () -> Unit, onRetry: () -> Unit, onOpen: () -> Unit, onDetails: () -> Unit) {
     val status = TaskStatus.fromStorage(task.status)
     val active = status == TaskStatus.QUEUED || status == TaskStatus.RUNNING
-    Card {
+    Card(onClick = onDetails) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -148,6 +153,53 @@ private fun TaskCard(task: TaskRecordEntity, onCancel: () -> Unit, onRetry: () -
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TaskDetailScreen(
+    workName: String,
+    viewModel: TaskViewModel,
+    onBack: () -> Unit,
+    onOpenBook: (String) -> Unit,
+    onOpenReader: (String, String) -> Unit
+) {
+    val tasks by viewModel.tasks.collectAsStateWithLifecycle()
+    val task = tasks.firstOrNull { it.workName == workName }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("任务详情") },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } }
+            )
+        }
+    ) { padding ->
+        if (task == null) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("任务记录不存在或已清理") }
+        } else {
+            val status = TaskStatus.fromStorage(task.status)
+            Column(Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(task.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("${TaskType.fromStorage(task.type)?.label() ?: "未知"} · ${status.label()}")
+                if (task.total > 0) {
+                    LinearProgressIndicator(progress = { task.completed.toFloat().div(task.total).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
+                    Text("${task.completed}/${task.total}")
+                }
+                Text(task.stage.ifBlank { "暂无阶段信息" })
+                task.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (status == TaskStatus.QUEUED || status == TaskStatus.RUNNING) {
+                    OutlinedButton(onClick = { viewModel.cancel(task) }, modifier = Modifier.fillMaxWidth()) { Text("取消任务") }
+                }
+                if (status == TaskStatus.FAILED || status == TaskStatus.CANCELLED) {
+                    Button(onClick = { viewModel.retry(task) }, modifier = Modifier.fillMaxWidth()) { Text("重试") }
+                }
+                OutlinedButton(
+                    onClick = { task.chapterId?.let { onOpenReader(task.bookId, it) } ?: onOpenBook(task.bookId) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("打开对应内容") }
             }
         }
     }

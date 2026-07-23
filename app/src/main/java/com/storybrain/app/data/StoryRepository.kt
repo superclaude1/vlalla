@@ -278,6 +278,9 @@ class StoryRepository(private val database: AppDatabase) {
         BookTtsSettingEntity(bookId, profileId, System.currentTimeMillis())
     )
 
+    suspend fun updateBookCoverPath(bookId: String, coverPath: String?) =
+        dao.updateBookCoverPath(bookId, coverPath)
+
     suspend fun setCharacterVoiceBinding(binding: CharacterVoiceBindingEntity) = database.withTransaction {
         dao.deactivateCharacterVoiceBindings(binding.characterId)
         dao.upsertCharacterVoiceBinding(binding.copy(active = true, updatedAt = System.currentTimeMillis()))

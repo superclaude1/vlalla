@@ -1,5 +1,6 @@
 package com.storybrain.app.ui.theme
 
+import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -7,6 +8,9 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.font.FontWeight
@@ -25,14 +29,14 @@ private val LightColors = lightColorScheme(
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Color(0xFFCFBCFF),
-    onPrimary = Color(0xFF35265D),
-    primaryContainer = Color(0xFF4D3D75),
-    secondary = Color(0xFF82D5C5),
-    secondaryContainer = Color(0xFF154F48),
-    background = Color(0xFF17151A),
-    surface = Color(0xFF211E24),
-    surfaceVariant = Color(0xFF49444D)
+    primary = Color(0xFFFF7A32),
+    onPrimary = Color(0xFF2A1100),
+    primaryContainer = Color(0xFF713000),
+    secondary = Color(0xFFAFC7D2),
+    secondaryContainer = Color(0xFF344C57),
+    background = Color(0xFF111315),
+    surface = Color(0xFF1C2023),
+    surfaceVariant = Color(0xFF34434A)
 )
 
 private val StoryShapes = Shapes(
@@ -52,9 +56,22 @@ private val StoryTypography = Typography().run {
 }
 
 @Composable
-fun StoryBrainTheme(content: @Composable () -> Unit) {
+fun StoryBrainTheme(mode: AppThemeMode = AppThemeMode.DARK, content: @Composable () -> Unit) {
+    val useDark = when (mode) {
+        AppThemeMode.DARK -> true
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
+    val view = LocalView.current
+    SideEffect {
+        val window = (view.context as? Activity)?.window ?: return@SideEffect
+        WindowCompat.getInsetsController(window, view).apply {
+            isAppearanceLightStatusBars = !useDark
+            isAppearanceLightNavigationBars = !useDark
+        }
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) DarkColors else LightColors,
+        colorScheme = if (useDark) DarkColors else LightColors,
         typography = StoryTypography,
         shapes = StoryShapes,
         content = content

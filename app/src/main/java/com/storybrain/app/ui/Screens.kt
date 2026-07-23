@@ -214,12 +214,7 @@ private fun ContinueReadingCard(book: BookEntity, onClick: () -> Unit) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
     ) {
         Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            androidx.compose.foundation.Image(
-                painter = painterResource(R.drawable.story_brain_cover),
-                contentDescription = "${book.title} 封面",
-                modifier = Modifier.size(width = 76.dp, height = 104.dp).clip(RoundedCornerShape(14.dp)),
-                contentScale = ContentScale.Crop
-            )
+            BookCover(book, Modifier.size(width = 76.dp, height = 104.dp).clip(RoundedCornerShape(14.dp)))
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("继续阅读", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
@@ -264,25 +259,21 @@ private fun EmptyLibrary(modifier: Modifier, onImport: () -> Unit) {
 @Composable
 private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
     Card(onClick = onClick, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(width = 64.dp, height = 88.dp).clip(RoundedCornerShape(10.dp))
                     .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center
             ) {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.story_brain_cover),
-                    contentDescription = "${book.title} 封面",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
+                BookCover(book, Modifier.fillMaxSize())
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
+                Text(book.sourceName, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${book.chapterCount}章 · ${formatChars(book.totalChars)}", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(6.dp))
                 LinearProgressIndicator(
                     progress = { if (book.chapterCount == 0) 0f else (book.currentChapterIndex + 1f) / book.chapterCount },
                     modifier = Modifier.fillMaxWidth()
@@ -1178,7 +1169,8 @@ fun CharacterChatScreen(
     bookId: String,
     characterId: String,
     viewModel: AppViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenMemoryPicker: (bookId: String, characterId: String, sessionId: String, suggestion: String) -> Unit
 ) {
     val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
     val sessions by viewModel.chatSessions(characterId).collectAsStateWithLifecycle(initialValue = emptyList())
@@ -1194,7 +1186,6 @@ fun CharacterChatScreen(
     var confirmDeleteSession by remember { mutableStateOf(false) }
     var sessionMenuExpanded by remember { mutableStateOf(false) }
     var renameSession by remember { mutableStateOf(false) }
-    var showMemoryPicker by remember { mutableStateOf(false) }
     var showDefaultMemoryNotice by remember { mutableStateOf(false) }
     var actionMessage by remember { mutableStateOf<ChatMessageEntity?>(null) }
     var saveMessage by remember { mutableStateOf<ChatMessageEntity?>(null) }
@@ -1215,9 +1206,6 @@ fun CharacterChatScreen(
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
     }
-    if (showMemoryPicker && currentSessionId.isNotBlank()) {
-        MemoryPickerSheet(bookId, characterId, currentSessionId, draft, viewModel) { showMemoryPicker = false }
-    }
     if (showDefaultMemoryNotice) {
         AlertDialog(
             onDismissRequest = { showDefaultMemoryNotice = false },
@@ -1227,7 +1215,9 @@ fun CharacterChatScreen(
             confirmButton = {
                 Button(onClick = {
                     showDefaultMemoryNotice = false
-                    showMemoryPicker = true
+                    if (currentSessionId.isNotBlank()) {
+                        onOpenMemoryPicker(bookId, characterId, currentSessionId, draft)
+                    }
                 }) { Text("现在调整") }
             }
         )
@@ -1340,7 +1330,7 @@ fun CharacterChatScreen(
                     val defaultCount = if (pickerMatches) pickerState.items.count { it.isDefault } else 0
                     val sessionCount = if (pickerMatches) pickerState.items.count { it.isSession } else 0
                     OutlinedButton(
-                        onClick = { showMemoryPicker = true },
+                        onClick = { onOpenMemoryPicker(bookId, characterId, currentSessionId, draft) },
                         enabled = currentSessionId.isNotBlank(),
                         modifier = Modifier.fillMaxWidth()
                     ) {

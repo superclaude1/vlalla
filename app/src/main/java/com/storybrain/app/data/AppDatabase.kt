@@ -33,7 +33,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TaskRecordEntity::class,
         ChapterSearchFtsEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -44,7 +44,13 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "story-brain.db"
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
+        ).addMigrations(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6
+        ).build()
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -192,6 +198,13 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     """INSERT OR IGNORE INTO `reading_positions` (`bookId`,`chapterId`,`sourceOffset`,`scrollOffsetPx`,`updatedAt`) SELECT b.`id`, c.`id`, 0, 0, b.`importedAt` FROM `books` b JOIN `chapters` c ON c.`bookId` = b.`id` AND c.`chapterIndex` = b.`currentChapterIndex`"""
                 )
+            }
+        }
+
+        /** Additive migration: existing books keep using generated title covers. */
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `books` ADD COLUMN `coverPath` TEXT")
             }
         }
     }

@@ -2,6 +2,7 @@ package com.storybrain.app.playback
 
 import android.content.ComponentName
 import android.content.Context
+import android.media.MediaExtractor
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.media3.common.C
@@ -14,9 +15,18 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.storybrain.app.data.SleepTimerMode
+import com.storybrain.app.data.NarrationSource
+import com.storybrain.app.data.NarrationStage
+import com.storybrain.app.data.NarrationUiState
 import com.storybrain.app.data.StoryRepository
 import com.storybrain.app.data.TaskStatus
+import com.storybrain.app.reader.ReadingBlock
+import com.storybrain.app.reader.TextToChatParser
+import com.storybrain.app.tts.AndroidTtsSynthesizer
+import com.storybrain.app.tts.ChapterTtsEngine
+import com.storybrain.app.tts.SystemTtsException
 import java.io.File
+import java.security.MessageDigest
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CoroutineScope
@@ -31,7 +41,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 
 data class PlaybackUiState(
     val connected: Boolean = false,
@@ -52,7 +64,8 @@ data class PlaybackUiState(
     val sleepTimerMode: SleepTimerMode = SleepTimerMode.OFF,
     val sleepTimerEndAt: Long = 0,
     val missingNextChapterAudio: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val narration: NarrationUiState = NarrationUiState()
 ) {
     val hasMedia: Boolean get() = chapterId != null
 }
@@ -73,10 +86,18 @@ class PlaybackRepository(
     private var queue: List<SegmentRef> = emptyList()
     private var queueEndsAtMissingAudio = false
     private var sleepJob: Job? = null
+    private var systemGenerationJob: Job? = null
+    private val systemTts = AndroidTtsSynthesizer(appContext)
+    private val automaticEdgeEngine = ChapterTtsEngine(appContext, storyRepository)
+    private val automaticEdgeJobs = mutableMapOf<String, Job>()
+    private val edgeCooldown = appContext.getSharedPreferences("edge_auto_cooldown_v6", Context.MODE_PRIVATE)
     private var lastPersistedAt = 0L
     private var lastChapterId: String? = null
 
     init {
+        scope.launch(Dispatchers.IO) {
+            runCatching { withTimeout(TTS_WARM_UP_TIMEOUT_MS) { systemTts.warmUp() } }
+        }
         controllerFuture.addListener(
             {
                 runCatching { controllerFuture.get() }
@@ -98,25 +119,50 @@ class PlaybackRepository(
         startBlockIndex: Int? = null,
         autoPlay: Boolean = true
     ): Result<Unit> = runCatching {
-        val prepared = withContext(Dispatchers.IO) { buildQueue(bookId, chapterId) }
-        withContext(Dispatchers.Main.immediate) {
-            val controller = controller()
-            require(prepared.items.isNotEmpty()) { "本章没有可播放的配音，请先生成" }
-            queue = prepared.refs
-            queueEndsAtMissingAudio = prepared.endsAtMissingAudio
-            val startIndex = startBlockIndex?.let { block ->
-                queue.indexOfFirst { it.chapterId == chapterId && it.blockIndex >= block }.takeIf { it >= 0 }
-            } ?: queue.indexOfFirst { it.chapterId == chapterId }.coerceAtLeast(0)
-            controller.setMediaItems(prepared.items, startIndex, 0)
-            controller.prepare()
-            controller.playWhenReady = autoPlay
-            lastChapterId = chapterId
-            _uiState.value = _uiState.value.copy(missingNextChapterAudio = false, error = null)
-            updateState(controller)
-            persist(force = true)
+        systemGenerationJob?.cancel()
+        val prepared = withContext(Dispatchers.IO) {
+            runCatching { buildQueue(bookId, chapterId) }.getOrNull()
+        }
+        if (prepared?.items?.isNotEmpty() == true) {
+            withContext(Dispatchers.Main.immediate) {
+                val controller = controller()
+                queue = prepared.refs
+                queueEndsAtMissingAudio = prepared.endsAtMissingAudio
+                val startIndex = startBlockIndex?.let { block ->
+                    queue.indexOfFirst { it.chapterId == chapterId && it.blockIndex >= block }.takeIf { it >= 0 }
+                } ?: queue.indexOfFirst { it.chapterId == chapterId }.coerceAtLeast(0)
+                controller.setMediaItems(prepared.items, startIndex, 0)
+                controller.prepare()
+                controller.playWhenReady = autoPlay
+                lastChapterId = chapterId
+                _uiState.value = _uiState.value.copy(
+                    missingNextChapterAudio = false,
+                    error = null,
+                    narration = NarrationUiState(
+                        source = NarrationSource.PREMIUM_CACHE,
+                        stage = NarrationStage.PREPARING,
+                        blockIndex = startBlockIndex ?: -1,
+                        completedSegments = prepared.items.size,
+                        totalSegments = prepared.items.size,
+                        detail = "正在准备精品配音"
+                    )
+                )
+                updateState(controller)
+                persist(force = true)
+            }
+        } else {
+            playWithSystemTts(bookId, chapterId, startBlockIndex, autoPlay)
         }
     }.onFailure { error ->
-        _uiState.value = _uiState.value.copy(error = error.message ?: "音频播放失败")
+        _uiState.value = _uiState.value.copy(
+            error = error.message ?: "音频播放失败",
+            narration = _uiState.value.narration.copy(
+                stage = NarrationStage.FAILED,
+                detail = error.message ?: "音频播放失败",
+                canRetry = true,
+                needsVoiceData = (error as? SystemTtsException)?.missingVoiceData == true
+            )
+        )
     }
 
     fun play() = withController { it.play() }
@@ -126,6 +172,7 @@ class PlaybackRepository(
         controller.stop()
         controller.clearMediaItems()
         queue = emptyList()
+        systemGenerationJob?.cancel()
         queueEndsAtMissingAudio = false
         _uiState.value = PlaybackUiState(connected = true, speed = _uiState.value.speed)
         persist(force = true)
@@ -198,6 +245,10 @@ class PlaybackRepository(
 
     fun release() {
         sleepJob?.cancel()
+        systemGenerationJob?.cancel()
+        automaticEdgeJobs.values.forEach(Job::cancel)
+        automaticEdgeJobs.clear()
+        systemTts.shutdown()
         scope.cancel()
         ContextCompat.getMainExecutor(appContext).execute {
             MediaController.releaseFuture(controllerFuture)
@@ -252,7 +303,9 @@ class PlaybackRepository(
         chapters.getOrNull(startIndex - 1)?.let { previous ->
             val previousManifest = previous.ttsManifestPath?.let(::File)
             if (TaskStatus.fromStorage(previous.ttsStatus) == TaskStatus.COMPLETED && previousManifest?.exists() == true) {
-                PlaybackManifestParser.parse(previousManifest).takeIf { it.isNotEmpty() }?.let { parsed ->
+                PlaybackManifestParser.parse(previousManifest)
+                    .filter { isDecodableAudio(File(it.path)) }
+                    .takeIf { it.isNotEmpty() }?.let { parsed ->
                     playableChapters += previous to parsed
                 }
             }
@@ -260,11 +313,26 @@ class PlaybackRepository(
         for (chapter in chapters.drop(startIndex)) {
             val manifest = chapter.ttsManifestPath?.let(::File)
             if (TaskStatus.fromStorage(chapter.ttsStatus) != TaskStatus.COMPLETED || manifest?.exists() != true) {
-                if (chapter.id == chapterId) error("本章尚未生成配音")
+                if (chapter.id == chapterId) {
+                    val partial = storyRepository.getTtsScript(chapter.id)
+                        ?.let { storyRepository.getTtsScriptSegments(it.id) }
+                        .orEmpty()
+                        .filter { TaskStatus.fromStorage(it.status) == TaskStatus.COMPLETED }
+                        .mapNotNull { segment ->
+                            val audio = segment.audioPath?.let(::File)?.takeIf(::isDecodableAudio) ?: return@mapNotNull null
+                            PlaybackManifestSegment(segment.segmentIndex, segment.blockIndex, segment.speaker, audio.absolutePath)
+                        }
+                    if (partial.isNotEmpty()) {
+                        playableChapters += chapter to partial
+                        missing = true
+                        break
+                    }
+                    error("本章尚未生成配音")
+                }
                 missing = true
                 break
             }
-            val parsed = PlaybackManifestParser.parse(manifest)
+            val parsed = PlaybackManifestParser.parse(manifest).filter { isDecodableAudio(File(it.path)) }
             if (parsed.isEmpty()) {
                 if (chapter.id == chapterId) error("本章配音清单无有效音频")
                 missing = true
@@ -298,6 +366,182 @@ class PlaybackRepository(
             }
         }
         return PreparedQueue(refs, items, missing)
+    }
+
+    /**
+     * Starts with one locally synthesized block, then appends later blocks to Media3 as they
+     * become available. This path never invokes LLM, Fish Audio or OpenAI-compatible TTS.
+     */
+    private suspend fun playWithSystemTts(
+        bookId: String,
+        chapterId: String,
+        startBlockIndex: Int?,
+        autoPlay: Boolean
+    ) {
+        _uiState.value = _uiState.value.copy(
+            error = null,
+            narration = NarrationUiState(
+                source = NarrationSource.SYSTEM_TTS,
+                stage = NarrationStage.PREPARING,
+                blockIndex = startBlockIndex ?: 0,
+                detail = "正在启动系统中文朗读"
+            )
+        )
+        val prepared = withContext(Dispatchers.IO) {
+            val book = storyRepository.getBook(bookId) ?: error("找不到小说")
+            val chapter = storyRepository.getChapter(chapterId) ?: error("找不到章节")
+            val aliases = buildMap {
+                storyRepository.getCharacters(bookId).forEach { character ->
+                    put(character.canonicalName, character.canonicalName)
+                    val values = runCatching { JSONArray(character.aliasesJson) }.getOrNull() ?: JSONArray()
+                    repeat(values.length()) { index ->
+                        values.optString(index).trim().takeIf(String::isNotBlank)?.let { putIfAbsent(it, character.canonicalName) }
+                    }
+                }
+            }
+            val blocks = TextToChatParser.parse(chapter.content, aliases)
+            require(blocks.isNotEmpty()) { "本章没有可朗读内容" }
+            val start = (startBlockIndex ?: 0).coerceIn(blocks.indices)
+            SystemNarration(book.id, book.title, chapter.id, chapter.title, chapter.chapterIndex, blocks, start)
+        }
+        val firstBlock = prepared.blocks[prepared.startIndex]
+        val firstFile = systemAudioFile(chapterId, prepared.startIndex, firstBlock.text)
+        withTimeout(FIRST_SOUND_TIMEOUT_MS) { systemTts.synthesize(firstBlock.text, firstFile) }
+        val firstRef = prepared.ref(prepared.startIndex)
+        val firstItem = prepared.item(firstRef, firstBlock, firstFile)
+        withContext(Dispatchers.Main.immediate) {
+            val controller = controller()
+            queue = listOf(firstRef)
+            queueEndsAtMissingAudio = false
+            controller.setMediaItem(firstItem)
+            controller.prepare()
+            controller.playWhenReady = autoPlay
+            lastChapterId = chapterId
+            _uiState.value = _uiState.value.copy(
+                narration = _uiState.value.narration.copy(
+                    stage = NarrationStage.PLAYING,
+                    blockIndex = prepared.startIndex,
+                    completedSegments = 1,
+                    totalSegments = prepared.blocks.size - prepared.startIndex,
+                    detail = "系统朗读已就绪"
+                )
+            )
+            updateState(controller)
+            persist(force = true)
+        }
+
+        systemGenerationJob = scope.launch(Dispatchers.IO) {
+            prepared.blocks.indices.drop(prepared.startIndex + 1).forEach { index ->
+                val block = prepared.blocks[index]
+                val output = systemAudioFile(chapterId, index, block.text)
+                runCatching { systemTts.synthesize(block.text, output) }
+                    .onFailure { error ->
+                        withContext(Dispatchers.Main.immediate) {
+                            _uiState.value = _uiState.value.copy(
+                                narration = _uiState.value.narration.copy(
+                                    stage = NarrationStage.FAILED,
+                                    detail = "第 ${index + 1} 段系统朗读失败：${error.message}",
+                                    canRetry = true,
+                                    needsVoiceData = (error as? SystemTtsException)?.missingVoiceData == true
+                                ),
+                                error = error.message
+                            )
+                        }
+                        return@launch
+                    }
+                val ref = prepared.ref(index)
+                val item = prepared.item(ref, block, output)
+                withContext(Dispatchers.Main.immediate) {
+                    val controller = controller()
+                    queue = queue + ref
+                    controller.addMediaItem(item)
+                    _uiState.value = _uiState.value.copy(
+                        narration = _uiState.value.narration.copy(
+                            stage = if (controller.isPlaying) NarrationStage.PLAYING else NarrationStage.GENERATING,
+                            completedSegments = index - prepared.startIndex + 1,
+                            detail = "已准备 ${index - prepared.startIndex + 1}/${prepared.blocks.size - prepared.startIndex} 段"
+                        )
+                    )
+                }
+            }
+        }
+        startAutomaticEdge(bookId, chapterId)
+    }
+
+    /** Free Edge enhancement runs independently and never interrupts the current system voice. */
+    private fun startAutomaticEdge(bookId: String, chapterId: String) {
+        if (automaticEdgeJobs[chapterId]?.isActive == true) return
+        val now = System.currentTimeMillis()
+        if (edgeCooldown.getLong("cooldown:$chapterId", 0L) > now) {
+            _uiState.value = _uiState.value.copy(
+                narration = _uiState.value.narration.copy(detail = "系统朗读中；Edge 暂停自动重试 30 分钟")
+            )
+            return
+        }
+        automaticEdgeJobs[chapterId] = scope.launch(Dispatchers.IO) {
+            runCatching {
+                automaticEdgeEngine.generate(
+                    bookId = bookId,
+                    chapterId = chapterId,
+                    onProgress = { completed, total ->
+                        _uiState.value = _uiState.value.copy(
+                            narration = _uiState.value.narration.copy(
+                                completedSegments = completed,
+                                totalSegments = total,
+                                detail = "系统朗读中；Edge 精品缓存 $completed/$total"
+                            )
+                        )
+                    },
+                    onStage = { stage ->
+                        _uiState.value = _uiState.value.copy(
+                            narration = _uiState.value.narration.copy(detail = "系统朗读中；Edge $stage")
+                        )
+                    },
+                    forceFreeEdge = true
+                )
+            }.onSuccess {
+                edgeCooldown.edit().putInt("failures:$chapterId", 0).remove("cooldown:$chapterId").apply()
+                _uiState.value = _uiState.value.copy(
+                    narration = _uiState.value.narration.copy(detail = "系统朗读中；Edge 精品缓存已完成，下次播放使用")
+                )
+            }.onFailure { error ->
+                val failures = edgeCooldown.getInt("failures:$chapterId", 0) + 1
+                edgeCooldown.edit()
+                    .putInt("failures:$chapterId", failures)
+                    .apply {
+                        if (failures >= 2) putLong("cooldown:$chapterId", System.currentTimeMillis() + EDGE_COOLDOWN_MS)
+                    }
+                    .apply()
+                _uiState.value = _uiState.value.copy(
+                    narration = _uiState.value.narration.copy(
+                        detail = "系统朗读不受影响；Edge 自动缓存失败：${error.message}",
+                        canRetry = true
+                    )
+                )
+            }
+            automaticEdgeJobs.remove(chapterId)
+        }
+    }
+
+    private fun systemAudioFile(chapterId: String, blockIndex: Int, text: String): File {
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+            .take(16)
+        return File(appContext.filesDir, "system-tts/$chapterId/${"%04d".format(blockIndex)}-$hash.wav")
+    }
+
+    private fun isDecodableAudio(file: File): Boolean {
+        if (!file.isFile || file.length() <= 128L) return false
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            extractor.trackCount > 0
+        } catch (_: Throwable) {
+            false
+        } finally {
+            extractor.release()
+        }
     }
 
     private suspend fun controller(): MediaController = suspendCancellableCoroutine { continuation ->
@@ -359,7 +603,15 @@ class PlaybackRepository(
             chapterDurationMs = chapterDuration,
             isPlaying = controller.isPlaying,
             isBuffering = controller.playbackState == Player.STATE_BUFFERING,
-            speed = controller.playbackParameters.speed
+            speed = controller.playbackParameters.speed,
+            narration = _uiState.value.narration.copy(
+                blockIndex = ref.blockIndex,
+                stage = when {
+                    controller.playbackState == Player.STATE_BUFFERING -> NarrationStage.BUFFERING
+                    controller.isPlaying -> NarrationStage.PLAYING
+                    else -> _uiState.value.narration.stage
+                }
+            )
         )
     }
 
@@ -437,6 +689,29 @@ class PlaybackRepository(
     }
 
     private data class PreparedQueue(val refs: List<SegmentRef>, val items: List<MediaItem>, val endsAtMissingAudio: Boolean)
+    private data class SystemNarration(
+        val bookId: String,
+        val bookTitle: String,
+        val chapterId: String,
+        val chapterTitle: String,
+        val chapterIndex: Int,
+        val blocks: List<ReadingBlock>,
+        val startIndex: Int
+    ) {
+        fun ref(index: Int) = SegmentRef(bookId, bookTitle, chapterId, chapterTitle, chapterIndex, index, index)
+
+        fun item(ref: SegmentRef, block: ReadingBlock, file: File): MediaItem = MediaItem.Builder()
+            .setMediaId(ref.encode())
+            .setUri(file.toUri())
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(chapterTitle)
+                    .setArtist(bookTitle)
+                    .setSubtitle((block as? ReadingBlock.Dialogue)?.speaker ?: "旁白")
+                    .build()
+            )
+            .build()
+    }
     private data class SegmentRef(
         val bookId: String,
         val bookTitle: String,
@@ -450,4 +725,10 @@ class PlaybackRepository(
     }
 
     private fun Long.safeDuration(): Long = takeIf { it != C.TIME_UNSET && it > 0 } ?: 0L
+
+    private companion object {
+        const val TTS_WARM_UP_TIMEOUT_MS = 10_000L
+        const val FIRST_SOUND_TIMEOUT_MS = 5_000L
+        const val EDGE_COOLDOWN_MS = 30 * 60_000L
+    }
 }

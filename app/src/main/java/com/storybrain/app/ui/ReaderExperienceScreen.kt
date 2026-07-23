@@ -1,6 +1,8 @@
 package com.storybrain.app.ui
 
 import android.graphics.Typeface
+import android.content.Intent
+import android.speech.tts.TextToSpeech
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.BackgroundColorSpan
@@ -10,6 +12,7 @@ import android.view.Menu
 import android.view.MenuItem
 import android.widget.TextView
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -28,18 +31,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.BookmarkAdd
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.FormatQuote
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.MoreVert
@@ -52,32 +50,22 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -94,6 +82,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -102,13 +91,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.storybrain.app.data.ChapterEntity
-import com.storybrain.app.data.ChapterListItem
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.data.ReadingMarkEntity
 import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReadingMode
-import com.storybrain.app.data.TaskStatus
 import com.storybrain.app.reader.ReadingBlock
 import com.storybrain.app.reader.ResolvedReadingPreferences
 import kotlinx.coroutines.delay
@@ -117,7 +104,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 
-private enum class ReaderDrawerTab { CONTENTS, BOOKMARKS, NOTES }
 private const val ACTION_MARK_SELECTION = 0x5A01
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -127,22 +113,22 @@ fun ReaderExperienceScreen(
     appViewModel: AppViewModel,
     playbackViewModel: PlaybackViewModel,
     onBack: () -> Unit,
-    onOpenChapter: (chapterId: String, sourceOffset: Int) -> Unit
+    onOpenChapter: (chapterId: String, sourceOffset: Int) -> Unit,
+    onOpenContents: () -> Unit,
+    onOpenSearch: () -> Unit,
+    onOpenAppearance: () -> Unit,
+    onOpenSettings: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val playback by playbackViewModel.uiState.collectAsStateWithLifecycle()
     val preferences = state.preferences
     val mode = preferences?.mode ?: ReadingMode.CHAT
     val blocks = state.document?.blocks(mode).orEmpty()
     val listState = rememberLazyListState()
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
     val snackbar = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     var chromeVisible by remember { mutableStateOf(true) }
-    var showSettings by remember { mutableStateOf(false) }
-    var showSearch by remember { mutableStateOf(false) }
     var selectedBlock by remember { mutableStateOf<ReadingBlock?>(null) }
-    var editingMark by remember { mutableStateOf<ReadingMarkEntity?>(null) }
     var pendingAnchor by remember { mutableIntStateOf(-1) }
     var restored by remember(state.chapter?.id) { mutableStateOf(false) }
     val chapter = state.chapter
@@ -203,11 +189,19 @@ fun ReaderExperienceScreen(
         val error = playback.error ?: return@LaunchedEffect
         val action = snackbar.showSnackbar(
             message = error,
-            actionLabel = if (playback.missingNextChapterAudio) "生成下一章" else null
+            actionLabel = when {
+                playback.narration.needsVoiceData -> "安装语音"
+                playback.missingNextChapterAudio -> "生成下一章"
+                else -> null
+            }
         )
-        if (action == androidx.compose.material3.SnackbarResult.ActionPerformed && playback.missingNextChapterAudio) {
-            state.chapters.getOrNull(playback.chapterIndex + 1)?.let {
-                appViewModel.generateChapterTts(viewModel.bookId, it.id)
+        if (action == androidx.compose.material3.SnackbarResult.ActionPerformed) {
+            if (playback.narration.needsVoiceData) {
+                runCatching { context.startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)) }
+            } else if (playback.missingNextChapterAudio) {
+                state.chapters.getOrNull(playback.chapterIndex + 1)?.let {
+                    appViewModel.generateChapterTts(viewModel.bookId, it.id)
+                }
             }
         }
         playbackViewModel.clearError()
@@ -237,70 +231,8 @@ fun ReaderExperienceScreen(
         )
     }
 
-    editingMark?.let { mark ->
-        EditReadingMarkDialog(
-            mark = mark,
-            onDismiss = { editingMark = null },
-            onSave = { note, colorKey ->
-                viewModel.updateMark(
-                    mark.copy(note = note, colorKey = colorKey, updatedAt = System.currentTimeMillis())
-                )
-                editingMark = null
-            }
-        )
-    }
-
-    if (showSearch) {
-        ReaderSearchDialog(
-            query = state.searchQuery,
-            loading = state.searching,
-            results = state.searchResults,
-            indexing = state.searchIndexing,
-            indexCompleted = state.searchIndexCompleted,
-            indexTotal = state.searchIndexTotal,
-            indexStage = state.searchIndexStage,
-            onQuery = viewModel::search,
-            onDismiss = { showSearch = false },
-            onOpen = { hit ->
-                showSearch = false
-                onOpenChapter(hit.chapterId, hit.sourceOffset)
-            }
-        )
-    }
-
-    if (showSettings && preferences != null) {
-        ReaderSettingsSheet(
-            initial = preferences,
-            onDismiss = { showSettings = false },
-            onSave = {
-                viewModel.saveStyle(it)
-                showSettings = false
-            },
-            onReset = {
-                viewModel.resetStyle()
-                showSettings = false
-            }
-        )
-    }
-
     val palette = readerPalette(preferences?.theme ?: ReaderTheme.PAPER)
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ReaderDrawer(
-                chapters = state.chapters,
-                currentChapterId = chapter?.id,
-                marks = state.marks,
-                onOpenChapter = { id, offset ->
-                    scope.launch { drawerState.close() }
-                    onOpenChapter(id, offset)
-                },
-                onDeleteMark = viewModel::deleteMark,
-                onEditMark = { editingMark = it }
-            )
-        }
-    ) {
-        Scaffold(
+    Scaffold(
             containerColor = palette.background,
             contentColor = palette.text,
             snackbarHost = { SnackbarHost(snackbar) },
@@ -326,11 +258,11 @@ fun ReaderExperienceScreen(
                             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
                         },
                         actions = {
-                            IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                Icon(Icons.AutoMirrored.Rounded.MenuBook, "目录、书签与批注")
+                            IconButton(onClick = onOpenContents) {
+                                Icon(Icons.AutoMirrored.Rounded.MenuBook, "打开目录页面")
                             }
-                            IconButton(onClick = { showSearch = true }) { Icon(Icons.Rounded.Search, "书内搜索") }
-                            IconButton(onClick = { showSettings = true }) { Icon(Icons.Rounded.Settings, "阅读设置") }
+                            IconButton(onClick = onOpenSearch) { Icon(Icons.Rounded.Search, "打开全文搜索页面") }
+                            IconButton(onClick = onOpenSettings) { Icon(Icons.Rounded.Settings, "打开阅读设置页面") }
                         }
                     )
                 }
@@ -359,11 +291,13 @@ fun ReaderExperienceScreen(
                         },
                         onAudio = {
                             val current = chapter ?: return@ReaderBottomBar
-                            if (current.ttsManifestPath.isNullOrBlank()) appViewModel.generateChapterTts(viewModel.bookId, current.id)
-                            else if (playback.chapterId == current.id && playback.isPlaying) playbackViewModel.pause()
+                            if (playback.chapterId == current.id && playback.isPlaying) playbackViewModel.pause()
                             else if (playback.chapterId == current.id) playbackViewModel.play()
                             else playbackViewModel.playChapter(viewModel.bookId, current.id)
-                        }
+                        },
+                        onContents = onOpenContents,
+                        onAppearance = onOpenAppearance,
+                        onSettings = onOpenSettings
                     )
                 }
             }
@@ -385,7 +319,6 @@ fun ReaderExperienceScreen(
                 },
                 onMark = { selectedBlock = it }
             )
-        }
     }
 }
 
@@ -438,27 +371,39 @@ private fun ReaderContent(
                     { onPlayBlock(block) },
                     { onMark(block) }
                 )
-                is ReadingBlock.Narration -> OriginalReadingBlock(
-                    block,
-                    preferences,
-                    palette,
-                    index == activeIndex,
-                    blockMarks,
-                    { onPlayBlock(block) },
-                    { selectionStart, selectionEnd ->
-                        val start = selectionStart.coerceIn(0, block.text.length)
-                        val end = selectionEnd.coerceIn(start, block.text.length)
-                        if (end > start) {
-                            onMark(
-                                ReadingBlock.Narration(
-                                    text = block.text.substring(start, end),
-                                    sourceStart = block.sourceStart + start,
-                                    sourceEnd = block.sourceStart + end
+                is ReadingBlock.Narration -> if (preferences?.mode == ReadingMode.CHAT) {
+                    NarrationReadingBlock(
+                        block = block,
+                        preferences = preferences,
+                        palette = palette,
+                        active = index == activeIndex,
+                        marked = blockMarks.isNotEmpty(),
+                        onClick = { onPlayBlock(block) },
+                        onLongClick = { onMark(block) }
+                    )
+                } else {
+                    OriginalReadingBlock(
+                        block,
+                        preferences,
+                        palette,
+                        index == activeIndex,
+                        blockMarks,
+                        { onPlayBlock(block) },
+                        { selectionStart, selectionEnd ->
+                            val start = selectionStart.coerceIn(0, block.text.length)
+                            val end = selectionEnd.coerceIn(start, block.text.length)
+                            if (end > start) {
+                                onMark(
+                                    ReadingBlock.Narration(
+                                        text = block.text.substring(start, end),
+                                        sourceStart = block.sourceStart + start,
+                                        sourceEnd = block.sourceStart + end
+                                    )
                                 )
-                            )
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
         }
     }
@@ -475,27 +420,81 @@ private fun DialogueReadingBlock(
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
-        Surface(shape = MaterialTheme.shapes.large, color = palette.accent.copy(alpha = .18f)) {
-            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                Text(block.speaker.take(1), color = palette.accent, fontWeight = FontWeight.Bold)
-            }
+    val isUnknown = block.speaker == "未识别角色"
+    val onRight = !isUnknown && block.speaker.hashCode().and(1) == 1
+    val speakerColor = if (isUnknown) palette.text.copy(alpha = .65f) else listOf(
+        Color(0xFFE17638), Color(0xFF5796D2), Color(0xFF6FAF75), Color(0xFFB278C5)
+    )[(block.speaker.hashCode() and Int.MAX_VALUE) % 4]
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = if (onRight) Arrangement.End else Arrangement.Start
+    ) {
+        if (!onRight) {
+            SpeakerAvatar(block.speaker, speakerColor)
+            Spacer(Modifier.width(10.dp))
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.widthIn(max = 520.dp)) {
+        Column(
+            Modifier.fillMaxWidth(.76f).widthIn(max = 560.dp),
+            horizontalAlignment = if (onRight) Alignment.End else Alignment.Start
+        ) {
             Text(block.speaker, style = MaterialTheme.typography.labelMedium, color = palette.accent)
             Spacer(Modifier.height(4.dp))
             Surface(
                 modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
                 shape = MaterialTheme.shapes.large,
                 color = when {
-                    active -> palette.accent.copy(alpha = .2f)
+                    active -> speakerColor.copy(alpha = .23f)
                     markColorKey != null -> markColor(markColorKey).copy(alpha = .16f)
                     else -> palette.surface
-                }
+                },
+                border = BorderStroke(1.dp, if (active) speakerColor else speakerColor.copy(alpha = .2f))
             ) {
                 ReaderText(block.text, preferences, palette.text, Modifier.padding(14.dp))
             }
+        }
+        if (onRight) {
+            Spacer(Modifier.width(10.dp))
+            SpeakerAvatar(block.speaker, speakerColor)
+        }
+    }
+}
+
+@Composable
+private fun SpeakerAvatar(speaker: String, color: Color) {
+    Surface(shape = MaterialTheme.shapes.large, color = color.copy(alpha = .18f)) {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            Text(speaker.take(1), color = color, fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NarrationReadingBlock(
+    block: ReadingBlock.Narration,
+    preferences: ResolvedReadingPreferences?,
+    palette: ReaderPalette,
+    active: Boolean,
+    marked: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(.82f)
+                .widthIn(max = 560.dp)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+            color = when {
+                active -> palette.accent.copy(alpha = .20f)
+                marked -> palette.accent.copy(alpha = .10f)
+                else -> palette.surface.copy(alpha = .72f)
+            },
+            border = BorderStroke(1.dp, if (active) palette.accent else palette.text.copy(alpha = .12f))
+        ) {
+            ReaderText(block.text, preferences, palette.text, Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
         }
     }
 }
@@ -602,7 +601,10 @@ private fun ReaderBottomBar(
     onMode: (ReadingMode) -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onAudio: () -> Unit
+    onAudio: () -> Unit,
+    onContents: () -> Unit,
+    onAppearance: () -> Unit,
+    onSettings: () -> Unit
 ) {
     Surface(color = palette.surface, contentColor = palette.text, shadowElevation = 8.dp) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
@@ -641,109 +643,35 @@ private fun ReaderBottomBar(
                     Icon(
                         when {
                             playing -> Icons.Rounded.Pause
-                            hasAudio -> Icons.Rounded.PlayArrow
-                            else -> Icons.Rounded.GraphicEq
+                            else -> Icons.Rounded.PlayArrow
                         },
-                        if (hasAudio) "播放配音" else "生成配音"
+                        if (playing) "暂停朗读" else "立即朗读"
                     )
                 }
                 IconButton(enabled = currentIndex in 0 until chapterCount - 1, onClick = onNext) {
                     Icon(Icons.AutoMirrored.Rounded.ArrowForward, "下一章")
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun ReaderDrawer(
-    chapters: List<ChapterListItem>,
-    currentChapterId: String?,
-    marks: List<ReadingMarkEntity>,
-    onOpenChapter: (String, Int) -> Unit,
-    onDeleteMark: (String) -> Unit,
-    onEditMark: (ReadingMarkEntity) -> Unit
-) {
-    var tab by remember { mutableStateOf(ReaderDrawerTab.CONTENTS) }
-    ModalDrawerSheet(Modifier.widthIn(max = 360.dp)) {
-        Text("阅读导航", Modifier.padding(20.dp), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        TabRow(tab.ordinal) {
-            ReaderDrawerTab.entries.forEach { item ->
-                Tab(
-                    selected = tab == item,
-                    onClick = { tab = item },
-                    text = { Text(when (item) {
-                        ReaderDrawerTab.CONTENTS -> "目录"
-                        ReaderDrawerTab.BOOKMARKS -> "书签"
-                        ReaderDrawerTab.NOTES -> "批注"
-                    }) }
-                )
-            }
-        }
-        when (tab) {
-            ReaderDrawerTab.CONTENTS -> LazyColumn(Modifier.fillMaxSize()) {
-                items(chapters, key = { it.id }) { chapter ->
-                    Row(
-                        Modifier.fillMaxWidth().selectable(chapter.id == currentChapterId) { onOpenChapter(chapter.id, 0) }.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("${chapter.chapterIndex + 1}", Modifier.width(36.dp), color = MaterialTheme.colorScheme.primary)
-                        Column(Modifier.weight(1f)) {
-                            Text(chapter.title, fontWeight = if (chapter.id == currentChapterId) FontWeight.Bold else FontWeight.Normal)
-                            Text(
-                                if (TaskStatus.fromStorage(chapter.ttsStatus) == TaskStatus.COMPLETED) "已有配音" else "${chapter.charCount} 字",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                        Icon(Icons.Rounded.ChevronRight, null)
-                    }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                TextButton(onClick = onContents) {
+                    Icon(Icons.AutoMirrored.Rounded.MenuBook, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("目录")
                 }
-            }
-            ReaderDrawerTab.BOOKMARKS -> MarkList(
-                marks.filter { ReadingMarkType.fromStorage(it.type) == ReadingMarkType.BOOKMARK },
-                chapters,
-                onOpenChapter,
-                onDeleteMark,
-                onEditMark
-            )
-            ReaderDrawerTab.NOTES -> MarkList(
-                marks.filter { ReadingMarkType.fromStorage(it.type) != ReadingMarkType.BOOKMARK },
-                chapters,
-                onOpenChapter,
-                onDeleteMark,
-                onEditMark
-            )
-        }
-    }
-}
-
-@Composable
-private fun MarkList(
-    marks: List<ReadingMarkEntity>,
-    chapters: List<ChapterListItem>,
-    onOpen: (String, Int) -> Unit,
-    onDelete: (String) -> Unit,
-    onEdit: (ReadingMarkEntity) -> Unit
-) {
-    if (marks.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.TopCenter) {
-            Text("还没有内容", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        return
-    }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(marks, key = { it.id }) { mark ->
-            Card(onClick = { onOpen(mark.chapterId, mark.startOffset) }) {
-                Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                    Text(chapters.firstOrNull { it.id == mark.chapterId }?.title ?: "章节", style = MaterialTheme.typography.labelMedium)
-                    Text(mark.excerpt, maxLines = 3, overflow = TextOverflow.Ellipsis, color = markColor(mark.colorKey))
-                    if (mark.note.isNotBlank()) Text(mark.note, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
-                    Row(Modifier.align(Alignment.End)) {
-                        if (ReadingMarkType.fromStorage(mark.type) != ReadingMarkType.BOOKMARK) {
-                            TextButton(onClick = { onEdit(mark) }) { Text("编辑") }
-                        }
-                        TextButton(onClick = { onDelete(mark.id) }) { Text("删除") }
-                    }
+                TextButton(onClick = onAudio) {
+                    Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.GraphicEq, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (playing) "暂停" else "朗读")
+                }
+                TextButton(onClick = onAppearance) {
+                    Icon(Icons.Rounded.FormatQuote, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("界面")
+                }
+                TextButton(onClick = onSettings) {
+                    Icon(Icons.Rounded.Settings, null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("设置")
                 }
             }
         }
@@ -781,29 +709,6 @@ private fun ReadingMarkDialog(
 }
 
 @Composable
-private fun EditReadingMarkDialog(
-    mark: ReadingMarkEntity,
-    onDismiss: () -> Unit,
-    onSave: (String, String) -> Unit
-) {
-    var note by remember(mark.id) { mutableStateOf(mark.note) }
-    var colorKey by remember(mark.id) { mutableStateOf(mark.colorKey) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("编辑批注") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(mark.excerpt, maxLines = 5, overflow = TextOverflow.Ellipsis)
-                TextField(note, { note = it }, label = { Text("批注") }, modifier = Modifier.fillMaxWidth())
-                MarkColorPicker(colorKey) { colorKey = it }
-            }
-        },
-        confirmButton = { Button(onClick = { onSave(note, colorKey) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
-}
-
-@Composable
 private fun MarkColorPicker(selected: String, onSelected: (String) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         listOf("amber" to "琥珀", "green" to "青绿", "blue" to "靛蓝").forEach { (key, label) ->
@@ -820,122 +725,4 @@ private fun markColor(key: String) = when (key) {
     "green" -> Color(0xFF2F6B52)
     "blue" -> Color(0xFF3E5E8C)
     else -> Color(0xFF9A6A15)
-}
-
-@Composable
-private fun ReaderSearchDialog(
-    query: String,
-    loading: Boolean,
-    results: List<com.storybrain.app.data.ChapterSearchHit>,
-    indexing: Boolean,
-    indexCompleted: Int,
-    indexTotal: Int,
-    indexStage: String,
-    onQuery: (String) -> Unit,
-    onDismiss: () -> Unit,
-    onOpen: (com.storybrain.app.data.ChapterSearchHit) -> Unit
-) {
-    var input by remember(query) { mutableStateOf(query) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("书内搜索") },
-        text = {
-            Column(Modifier.height(430.dp)) {
-                TextField(
-                    input,
-                    { input = it },
-                    label = { Text("输入关键词") },
-                    trailingIcon = { IconButton(onClick = { onQuery(input) }) { Icon(Icons.Rounded.Search, "搜索") } },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                if (indexing) {
-                    if (indexTotal > 0) {
-                        LinearProgressIndicator(
-                            progress = { indexCompleted.toFloat().div(indexTotal).coerceIn(0f, 1f) },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    } else {
-                        LinearProgressIndicator(Modifier.fillMaxWidth())
-                    }
-                    Text(
-                        indexStage.ifBlank { "正在建立旧书全文索引" },
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    Spacer(Modifier.height(8.dp))
-                }
-                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(results) { hit ->
-                        Card(onClick = { onOpen(hit) }) {
-                            Column(Modifier.fillMaxWidth().padding(10.dp)) {
-                                Text(hit.chapterTitle, fontWeight = FontWeight.Bold)
-                                Text(hit.excerpt, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = { onQuery(input) }) { Text("搜索") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ReaderSettingsSheet(
-    initial: ResolvedReadingPreferences,
-    onDismiss: () -> Unit,
-    onSave: (ResolvedReadingPreferences) -> Unit,
-    onReset: () -> Unit
-) {
-    var draft by remember(initial) { mutableStateOf(initial) }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("阅读样式", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ReaderTheme.entries.forEach { theme ->
-                    FilterChip(
-                        selected = draft.theme == theme,
-                        onClick = { draft = draft.copy(theme = theme) },
-                        label = { Text(when (theme) {
-                            ReaderTheme.PAPER -> "纸白"
-                            ReaderTheme.SEPIA -> "羊皮纸"
-                            ReaderTheme.NIGHT -> "夜间"
-                        }) }
-                    )
-                }
-            }
-            Text("字号 ${draft.fontSizeSp.toInt()}")
-            Slider(draft.fontSizeSp, { draft = draft.copy(fontSizeSp = it) }, valueRange = 14f..30f, steps = 15)
-            Text("行距 ${"%.1f".format(draft.lineHeightMultiplier)}")
-            Slider(draft.lineHeightMultiplier, { draft = draft.copy(lineHeightMultiplier = it) }, valueRange = 1.2f..2.2f, steps = 9)
-            Text("段距 ${draft.paragraphSpacingDp.toInt()} dp")
-            Slider(draft.paragraphSpacingDp, { draft = draft.copy(paragraphSpacingDp = it) }, valueRange = 0f..24f, steps = 11)
-            Text("页边距 ${draft.horizontalPaddingDp} dp")
-            Slider(draft.horizontalPaddingDp.toFloat(), { draft = draft.copy(horizontalPaddingDp = it.toInt()) }, valueRange = 12f..40f, steps = 13)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = !draft.serifFont, onClick = { draft = draft.copy(serifFont = false) }, label = { Text("系统字体") })
-                FilterChip(selected = draft.serifFont, onClick = { draft = draft.copy(serifFont = true) }, label = { Text("衬线字体") })
-            }
-            FilterChip(
-                selected = draft.autoFollowAudio,
-                onClick = { draft = draft.copy(autoFollowAudio = !draft.autoFollowAudio) },
-                label = { Text("听书自动跟随段落") }
-            )
-            HorizontalDivider()
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TextButton(onClick = onReset) { Text("恢复全局设置") }
-                Button(onClick = { onSave(draft.copy(usesGlobalStyle = false)) }) { Text("应用到本书") }
-            }
-            Spacer(Modifier.height(12.dp))
-        }
-    }
 }

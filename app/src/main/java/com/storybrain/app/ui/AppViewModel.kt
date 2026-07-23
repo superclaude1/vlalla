@@ -12,6 +12,7 @@ import com.storybrain.app.data.MemoryItemEntity
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.MemoryWithSelection
 import com.storybrain.app.data.BookTtsSettingEntity
+import com.storybrain.app.data.BookCoverStore
 import com.storybrain.app.data.CharacterVoiceBindingEntity
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.export.Neo4jExporter
@@ -75,6 +76,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val ttsEngine = ChapterTtsEngine(application, repository, ttsSettings)
     private val longTasks = (application as StoryBrainApplication).longTaskScheduler
     private val playback = (application as StoryBrainApplication).playbackRepository
+    private val coverStore = BookCoverStore(application, repository)
     private val _analysisState = MutableStateFlow(AnalysisUiState())
     val analysisState = _analysisState.asStateFlow()
     private val _characterChatState = MutableStateFlow(CharacterChatUiState())
@@ -200,6 +202,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateReadingProgress(bookId, chapterIndex) }
     }
 
+    fun importBookCover(bookId: String, uri: Uri, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            runCatching { coverStore.import(bookId, uri) }
+                .onSuccess { onResult(null) }
+                .onFailure { onResult(it.message ?: "封面导入失败") }
+        }
+    }
+
+    fun restoreDefaultCover(bookId: String, currentPath: String?, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            runCatching { coverStore.restoreDefault(bookId, currentPath) }
+                .onSuccess { onResult(null) }
+                .onFailure { onResult(it.message ?: "恢复默认封面失败") }
+        }
+    }
+
     fun generateChapterTts(bookId: String, chapterId: String) {
         viewModelScope.launch {
             playback.pause()
@@ -274,6 +292,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val chapterIds = repository.getChapters(bookId).map { it.id }
                 playback.stopIfBook(bookId)
                 longTasks.cancelBook(bookId, chapterIds)
+                coverStore.restoreDefault(bookId, repository.getBook(bookId)?.coverPath)
                 repository.deleteBook(bookId)
                 withContext(Dispatchers.IO) { ttsEngine.deleteAudio(chapterIds) }
             }.onSuccess {

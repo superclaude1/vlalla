@@ -5,6 +5,7 @@ import com.storybrain.app.data.StoryCharacterEntity
 import com.storybrain.app.data.StoryRepository
 import com.storybrain.app.data.TaskStatus
 import com.storybrain.app.data.TtsProviderKind
+import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsScriptEntity
 import com.storybrain.app.data.TtsScriptSegmentEntity
 import com.storybrain.app.reader.ReadingBlock
@@ -13,9 +14,10 @@ import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.TtsSettingsStore
 import java.io.File
 import java.security.MessageDigest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 import kotlin.random.Random
 import org.json.JSONArray
@@ -36,7 +38,8 @@ class ChapterTtsEngine(
         bookId: String,
         chapterId: String,
         onProgress: suspend (completed: Int, total: Int) -> Unit,
-        onStage: suspend (String) -> Unit = {}
+        onStage: suspend (String) -> Unit = {},
+        forceFreeEdge: Boolean = false
     ): TtsGenerationResult {
         repository.ensureDefaultTtsProfiles()
         val chapter = repository.getChapter(chapterId) ?: error("找不到本章")
@@ -46,33 +49,43 @@ class ChapterTtsEngine(
         val blocks = TextToChatParser.parse(chapter.content, aliases)
         require(blocks.isNotEmpty()) { "本章没有可配音内容" }
         val sourceHash = sha256(chapter.content)
-        val llmConfig = llmSettings.config.first()
+        // v0.6 automatic generation is deterministic and local. LLM direction is reserved for
+        // a future explicit "智能演绎" user action and is never part of ordinary narration.
+        val directionModel = LOCAL_DIRECTION_MODEL
         val scriptId = "tts-$chapterId"
         val previousScript = repository.getTtsScript(chapterId)
         val previousSegments = previousScript?.takeIf {
-            it.sourceHash == sourceHash && it.llmModel == llmConfig.model && it.promptVersion == TtsDirectingService.PROMPT_VERSION
+            it.sourceHash == sourceHash && it.llmModel == directionModel && it.promptVersion == LOCAL_DIRECTION_VERSION
         }?.let { repository.getTtsScriptSegments(it.id) }.orEmpty()
         val cachedDirectives = previousSegments.groupBy { it.blockIndex }
             .mapValues { (_, values) -> directivesFromJson(values.first().directivesJson) }
-        val directions = if (cachedDirectives.keys.containsAll(blocks.indices.toList())) {
-            blocks.indices.associateWith { cachedDirectives.getValue(it) }
-        } else {
-            onStage("正在调用 LLM 生成演绎脚本…")
-            directingService.direct(blocks) { completed, total -> onStage("正在生成演绎脚本 $completed/$total") }
-                .associate { it.segmentId.toInt() to it.directives }
+        val directions = blocks.indices.associateWith { index ->
+            cachedDirectives[index] ?: LocalTtsDirector.direct(blocks, index)
         }
         onStage("正在解析角色平台与音色…")
         val jobs = mutableListOf<SpeechJob>()
         blocks.forEachIndexed { blockIndex, block ->
             val speaker = (block as? ReadingBlock.Dialogue)?.speaker
             val character = speaker?.let(characterByName::get)
-            val resolved = resolver.resolve(bookId, speaker, character)
+            val resolved = if (forceFreeEdge) {
+                val edge = repository.getTtsProfile(TtsProfileIds.EDGE) ?: error("Edge TTS 配置不存在")
+                val voice = when (character?.gender) {
+                    "MALE" -> "zh-CN-YunxiNeural"
+                    "FEMALE" -> "zh-CN-XiaoyiNeural"
+                    else -> "zh-CN-XiaoxiaoNeural"
+                }
+                ResolvedTtsVoice(edge, voice, if (character == null) "旁白·晓晓" else voice, false)
+            } else {
+                resolver.resolve(bookId, speaker, character)
+            }
             val kind = TtsProviderKind.valueOf(resolved.profile.kind)
-            val chunks = splitText(block.text, when (kind) {
+            val chunks = when (kind) {
                 TtsProviderKind.FISH_AUDIO -> 220
                 TtsProviderKind.OPENAI_COMPATIBLE -> 1_000
-                TtsProviderKind.EDGE -> 700
-            })
+                TtsProviderKind.EDGE -> 240
+            }.let { limit ->
+                if (kind == TtsProviderKind.EDGE) splitEdgeText(block.text) else splitText(block.text, limit)
+            }
             chunks.forEachIndexed { chunkIndex, text ->
                 val directives = directions[blockIndex] ?: LocalTtsDirector.direct(blocks, blockIndex)
                 val rendered = when (kind) {
@@ -103,8 +116,8 @@ class ChapterTtsEngine(
                 bookId = bookId,
                 chapterId = chapterId,
                 sourceHash = sourceHash,
-                llmModel = llmConfig.model,
-                promptVersion = TtsDirectingService.PROMPT_VERSION,
+                llmModel = directionModel,
+                promptVersion = LOCAL_DIRECTION_VERSION,
                 status = TaskStatus.RUNNING.name,
                 createdAt = previousScript?.createdAt ?: now,
                 updatedAt = now
@@ -129,13 +142,16 @@ class ChapterTtsEngine(
                 val fileName = "%04d.mp3".format(index)
                 val cacheFile = File(cache, "${job.cacheKey}.mp3")
                 if (!cacheFile.exists() || cacheFile.length() == 0L) {
-                    synthesizeWithRetry(job, cacheFile)
+                    val stageScope = CoroutineScope(coroutineContext)
+                    synthesizeWithRetry(job, cacheFile) { stage ->
+                        stageScope.launch { onStage("${stage.label} · ${index + 1}/${jobs.size}") }
+                    }
                 }
                 val stagingFile = File(staging, fileName)
                 cacheFile.copyTo(stagingFile, overwrite = true)
                 val row = job.toEntity(
                     scriptId, TaskStatus.COMPLETED,
-                    File(directory, fileName).absolutePath, null, System.currentTimeMillis()
+                    cacheFile.absolutePath, null, System.currentTimeMillis()
                 )
                 repository.updateTtsScriptSegments(listOf(row))
                 manifestSegments.put(job.manifest(File(directory, fileName)))
@@ -146,8 +162,8 @@ class ChapterTtsEngine(
                     .put("bookId", bookId)
                     .put("chapterId", chapterId)
                     .put("sourceHash", sourceHash)
-                    .put("llmModel", llmConfig.model)
-                    .put("promptVersion", TtsDirectingService.PROMPT_VERSION)
+                    .put("llmModel", directionModel)
+                    .put("promptVersion", LOCAL_DIRECTION_VERSION)
                     .put("generatedAt", System.currentTimeMillis())
                     .put("segments", manifestSegments)
                     .toString(2),
@@ -163,7 +179,7 @@ class ChapterTtsEngine(
             val manifest = File(directory, "manifest.json")
             repository.updateTtsResult(chapterId, TaskStatus.COMPLETED, manifest.absolutePath)
             repository.saveTtsScript(
-                TtsScriptEntity(scriptId, bookId, chapterId, sourceHash, llmConfig.model, TtsDirectingService.PROMPT_VERSION, TaskStatus.COMPLETED.name, previousScript?.createdAt ?: now, System.currentTimeMillis()),
+                TtsScriptEntity(scriptId, bookId, chapterId, sourceHash, directionModel, LOCAL_DIRECTION_VERSION, TaskStatus.COMPLETED.name, previousScript?.createdAt ?: now, System.currentTimeMillis()),
                 jobs.mapIndexed { index, job -> job.toEntity(scriptId, TaskStatus.COMPLETED, File(directory, "%04d.mp3".format(index)).absolutePath, null, System.currentTimeMillis()) }
             )
             TtsGenerationResult(manifest.absolutePath, jobs.size)
@@ -179,7 +195,11 @@ class ChapterTtsEngine(
         }
     }
 
-    private suspend fun synthesizeWithRetry(job: SpeechJob, output: File) {
+    private suspend fun synthesizeWithRetry(
+        job: SpeechJob,
+        output: File,
+        onEdgeStage: (EdgeTransferStage) -> Unit
+    ) {
         val provider = provider(job.resolved)
         val request = TtsSynthesisRequest(
             text = job.text,
@@ -191,15 +211,17 @@ class ChapterTtsEngine(
             idempotencyKey = job.cacheKey
         )
         var last: Throwable? = null
-        repeat(3) { attempt ->
+        val attempts = if (TtsProviderKind.valueOf(job.resolved.profile.kind) == TtsProviderKind.EDGE) 1 else 2
+        repeat(attempts) { attempt ->
             try {
                 coroutineContext.ensureActive()
-                provider.synthesize(request, output)
+                if (provider is EdgeTtsProvider) provider.synthesize(request, output, onEdgeStage)
+                else provider.synthesize(request, output)
                 return
             } catch (error: Throwable) {
                 last = error
                 val retryable = (error as? TtsProviderException)?.retryable == true
-                if (!retryable || attempt == 2) throw error
+                if (!retryable || attempt == attempts - 1) throw error
                 val retryAfter = (error as? TtsProviderException)?.retryAfterMillis
                 val backoff = retryAfter ?: (500L * (1 shl attempt) + Random.nextLong(0, 250))
                 delay(backoff.coerceAtMost(30_000L))
@@ -280,6 +302,30 @@ class ChapterTtsEngine(
         return result
     }
 
+    /** Natural-sentence Edge chunks: target 80-160 chars, hard limit 240. */
+    internal fun splitEdgeText(text: String): List<String> {
+        if (text.length <= EDGE_TARGET_MAX) return listOf(text.trim()).filter(String::isNotBlank)
+        val output = mutableListOf<String>()
+        var start = 0
+        while (start < text.length) {
+            while (start < text.length && text[start].isWhitespace()) start++
+            if (start >= text.length) break
+            val hardEnd = minOf(start + EDGE_HARD_MAX, text.length)
+            if (hardEnd == text.length) {
+                text.substring(start).trim().takeIf(String::isNotBlank)?.let(output::add)
+                break
+            }
+            val targetEnd = minOf(start + EDGE_TARGET_MAX, hardEnd)
+            val forward = (targetEnd until hardEnd).firstOrNull { text[it] in EDGE_BOUNDARIES }?.plus(1)
+            val backwardStart = minOf(start + EDGE_TARGET_MIN, targetEnd)
+            val backward = (targetEnd downTo backwardStart).firstOrNull { text[it - 1] in EDGE_BOUNDARIES }
+            val end = forward ?: backward ?: hardEnd
+            text.substring(start, end).trim().takeIf(String::isNotBlank)?.let(output::add)
+            start = end
+        }
+        return output
+    }
+
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
 
@@ -330,5 +376,14 @@ class ChapterTtsEngine(
             .put("cacheKey", cacheKey)
             .put("generatedAt", System.currentTimeMillis())
             .put("path", path.absolutePath)
+    }
+
+    private companion object {
+        const val LOCAL_DIRECTION_MODEL = "local-director-v2"
+        const val LOCAL_DIRECTION_VERSION = 2
+        const val EDGE_TARGET_MIN = 80
+        const val EDGE_TARGET_MAX = 160
+        const val EDGE_HARD_MAX = 240
+        val EDGE_BOUNDARIES = setOf('。', '！', '？', '!', '?', '；', ';', '，', ',', '\n')
     }
 }

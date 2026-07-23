@@ -27,7 +27,7 @@ object NetworkClients {
 
     val webSocket: OkHttpClient by lazy {
         standard.newBuilder()
-            .connectTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
     }

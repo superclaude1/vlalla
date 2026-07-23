@@ -15,7 +15,9 @@ data class BookEntity(
     val chapterCount: Int,
     val totalChars: Long,
     val currentChapterIndex: Int = 0,
-    val analysisCompleted: Int = 0
+    val analysisCompleted: Int = 0,
+    /** Relative path below filesDir. Null means the generated title cover is used. */
+    val coverPath: String? = null
 )
 
 /** Single-query bookshelf model. Counts are calculated by Room instead of per-card Flows. */

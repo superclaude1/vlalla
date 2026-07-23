@@ -35,7 +35,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -157,13 +156,13 @@ fun MemoryCenterScreen(bookId: String, viewModel: AppViewModel, onBack: () -> Un
 }
 
 @Composable
-fun MemoryPickerSheet(
+fun MemoryPickerScreen(
     bookId: String,
     characterId: String,
     sessionId: String,
     suggestionText: String,
     viewModel: AppViewModel,
-    onDismiss: () -> Unit
+    onBack: () -> Unit
 ) {
     val state by viewModel.memoryPickerState.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
@@ -182,13 +181,32 @@ fun MemoryPickerSheet(
             (chapterText.toIntOrNull()?.let { limit -> (memory.chapterEndIndex ?: -1) < limit } ?: true)
     }
     val selected = state.items.filter { !it.isLocked && (it.isDefault || it.isSession) }.distinctBy { it.id }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-            Text("选择对话记忆", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 16.dp))
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("选择对话记忆")
+                        Text(
+                            "已选 ${selected.size}/${StoryRepository.MAX_SELECTED_MEMORIES} 条 · ${selected.sumOf { it.content.length }}/${StoryRepository.MAX_MEMORY_CHARS} 字",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
             Text(
-                "已选 ${selected.size}/${StoryRepository.MAX_SELECTED_MEMORIES} 条 · ${selected.sumOf { it.content.length }}/${StoryRepository.MAX_MEMORY_CHARS} 字",
+                "记忆只在本地选择；未勾选内容不会发送给对话模型。",
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
             OutlinedTextField(
                 value = query,
@@ -217,8 +235,8 @@ fun MemoryPickerSheet(
                 Text(it, color = if (state.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 4.dp))
             }
             LazyColumn(
-                modifier = Modifier.fillMaxWidth().height(460.dp),
-                contentPadding = PaddingValues(16.dp, 8.dp),
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (state.suggestions.isNotEmpty() && query.isBlank()) {

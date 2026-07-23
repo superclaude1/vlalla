@@ -1,6 +1,7 @@
 package com.storybrain.app.settings
 
 import android.app.Application
+import android.media.MediaPlayer
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.storybrain.app.StoryBrainApplication
@@ -12,14 +13,18 @@ import com.storybrain.app.data.TtsVoiceRole
 import com.storybrain.app.tts.EdgeTtsClient
 import com.storybrain.app.tts.FishAudioClient
 import com.storybrain.app.tts.OpenAiTtsClient
+import com.storybrain.app.tts.TtsDirectives
 import com.storybrain.app.tts.TtsVoice
 import java.io.File
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 
 data class SettingsUiState(
@@ -177,10 +182,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 withContext(Dispatchers.IO) {
                     when (TtsProviderKind.valueOf(profile.kind)) {
                         TtsProviderKind.EDGE -> {
-                            val output = File(getApplication<Application>().cacheDir, "edge-test.mp3")
-                            try { edgeClient.synthesize("章境配音连接测试", "zh-CN-XiaoxiaoNeural", output) }
-                            finally { output.delete() }
-                            emptyList<String>() to "Edge TTS 直连成功"
+                            val output = File(getApplication<Application>().cacheDir, "edge-real-payload-preview.mp3")
+                            try {
+                                edgeClient.synthesize(
+                                    EDGE_REAL_PAYLOAD,
+                                    "zh-CN-XiaoxiaoNeural",
+                                    TtsDirectives(),
+                                    output
+                                ) { stage ->
+                                    _state.value = _state.value.copy(ttsMessage = "真实负载试听：${stage.label}")
+                                }
+                                playPreview(output)
+                            } finally {
+                                output.delete()
+                            }
+                            emptyList<String>() to "真实负载试听通过：已生成、校验并播放约 150 字音频"
                         }
                         TtsProviderKind.FISH_AUDIO -> {
                             val key = snapshot.ttsApiKeyDraft.ifBlank { ttsStore.readApiKey(profile.id) }
@@ -311,5 +327,35 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         TtsVoiceRole.MALE -> "男性"
         TtsVoiceRole.FEMALE -> "女性"
         TtsVoiceRole.UNKNOWN -> "通用"
+    }
+
+    private suspend fun playPreview(file: File) = suspendCancellableCoroutine { continuation ->
+        val player = MediaPlayer()
+        continuation.invokeOnCancellation { player.release() }
+        runCatching {
+            player.setDataSource(file.absolutePath)
+            player.setOnCompletionListener {
+                it.release()
+                if (continuation.isActive) continuation.resume(Unit)
+            }
+            player.setOnErrorListener { mediaPlayer, what, extra ->
+                mediaPlayer.release()
+                if (continuation.isActive) {
+                    continuation.resumeWithException(IllegalStateException("试听播放失败（$what/$extra）"))
+                }
+                true
+            }
+            player.prepare()
+            require(player.duration > 0) { "试听音频无法解码" }
+            player.start()
+        }.onFailure { error ->
+            player.release()
+            if (continuation.isActive) continuation.resumeWithException(error)
+        }
+    }
+
+    private companion object {
+        const val EDGE_REAL_PAYLOAD =
+            "暮色从窗外缓缓落下，街边的灯一盏接一盏亮起。林川合上手中的旧书，听见雨点敲在玻璃上，像有人在远处轻轻叩门。他停了片刻，起身检查门窗，又回头望向桌上的信封。那上面没有署名，只有一句话：请在午夜之前抵达钟楼，并且不要告诉任何人。"
     }
 }

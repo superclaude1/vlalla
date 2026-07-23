@@ -58,11 +58,15 @@ import com.storybrain.app.data.TtsVoiceRole
 import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.settings.SettingsViewModel
 
+enum class SettingsSection { ALL, READING, LLM, TTS }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel = viewModel(),
-    readerViewModel: ReaderDefaultsViewModel = viewModel()
+    readerViewModel: ReaderDefaultsViewModel = viewModel(),
+    section: SettingsSection = SettingsSection.ALL,
+    onBack: (() -> Unit)? = null
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val readerDefaults by readerViewModel.preferences.collectAsStateWithLifecycle()
@@ -78,7 +82,15 @@ fun SettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("设置") }
+                title = { Text(when (section) {
+                    SettingsSection.ALL -> "设置"
+                    SettingsSection.READING -> "阅读默认值"
+                    SettingsSection.LLM -> "LLM 服务"
+                    SettingsSection.TTS -> "配音服务"
+                }) },
+                navigationIcon = {
+                    if (onBack != null) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
+                }
             )
         }
     ) { padding ->
@@ -87,8 +99,9 @@ fun SettingsScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            item { SectionHeader("阅读与播放", "新打开的小说默认使用这些排版设置；每本书仍可单独覆盖。") }
-            item {
+            if (section == SettingsSection.ALL || section == SettingsSection.READING) {
+                item { SectionHeader("阅读与播放", "新打开的小说默认使用这些排版设置；每本书仍可单独覆盖。") }
+                item {
                 Card {
                     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("阅读主题", fontWeight = FontWeight.Bold)
@@ -149,10 +162,11 @@ fun SettingsScreen(
                         }
                     }
                 }
+                }
             }
-            item { SectionHeader("AI 与配音服务", "以下为高级服务配置，密钥只保存在本机。") }
-            item { SectionHeader("LLM 分析服务", "用于小说分析、角色对话和章节演绎标注，支持 OpenAI-compatible 接口。") }
-            item {
+            if (section == SettingsSection.ALL || section == SettingsSection.LLM) {
+                item { SectionHeader("LLM 分析服务", "用于小说分析和角色对话，支持 OpenAI-compatible 接口。") }
+                item {
                 Card { Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(state.baseUrl, viewModel::updateBaseUrl, Modifier.fillMaxWidth(), label = { Text("API Base URL") }, singleLine = true)
                     if (state.baseUrl.trim().startsWith("http://", ignoreCase = true)) {
@@ -182,9 +196,11 @@ fun SettingsScreen(
                     }
                     StatusText(state.message, state.isError)
                 } }
+                }
             }
 
-            item { SectionHeader("全局主力引擎", "旁白和未单独设置的角色使用主力引擎；每本小说仍可覆盖。") }
+            if (section == SettingsSection.ALL || section == SettingsSection.TTS) {
+            item { SectionHeader("全局主力引擎", "精品配音所用引擎；即时朗读始终可使用系统中文 TTS。") }
             item {
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     state.profiles.forEach { profile ->
@@ -245,7 +261,7 @@ fun SettingsScreen(
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(viewModel::detectTtsService, Modifier.weight(1f), enabled = !state.ttsDetecting) { Icon(Icons.Rounded.CloudSync, null); Spacer(Modifier.width(6.dp)); Text("连接测试") }
+                        OutlinedButton(viewModel::detectTtsService, Modifier.weight(1f), enabled = !state.ttsDetecting) { Icon(Icons.Rounded.CloudSync, null); Spacer(Modifier.width(6.dp)); Text("真实负载试听") }
                         Button(viewModel::saveTts, Modifier.weight(1f)) { Icon(Icons.Rounded.CheckCircle, null); Spacer(Modifier.width(6.dp)); Text("保存") }
                     }
                     StatusText(state.ttsMessage, state.ttsIsError)
@@ -305,6 +321,7 @@ fun SettingsScreen(
                     Text("各平台 API Key 分别通过 Android Keystore AES-GCM 加密。失败时不会静默切换声音平台。", style = MaterialTheme.typography.bodySmall)
                     Text("章境 ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})", style = MaterialTheme.typography.labelSmall)
                 } }
+            }
             }
         }
     }

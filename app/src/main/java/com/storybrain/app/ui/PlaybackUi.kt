@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -23,10 +24,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -70,17 +72,23 @@ fun MiniPlayerBar(state: PlaybackUiState, viewModel: PlaybackViewModel, onExpand
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ExpandedPlayerSheet(state: PlaybackUiState, viewModel: PlaybackViewModel, onDismiss: () -> Unit) {
+fun FullPlayerScreen(state: PlaybackUiState, viewModel: PlaybackViewModel, onBack: () -> Unit) {
     var dragging by remember { mutableStateOf(false) }
     var dragPosition by remember(state.chapterPositionMs) { mutableFloatStateOf(state.chapterPositionMs.toFloat()) }
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("播放器") },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxWidth().padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(state.chapterTitle, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Text(state.bookTitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, "关闭") }
             }
             Slider(
                 value = if (dragging) dragPosition else state.chapterPositionMs.toFloat(),
@@ -139,6 +147,14 @@ fun ExpandedPlayerSheet(state: PlaybackUiState, viewModel: PlaybackViewModel, on
                 Text("定时将在 ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(state.sleepTimerEndAt))} 停止")
             }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            Text(
+                state.narration.detail ?: when (state.narration.source) {
+                    com.storybrain.app.data.NarrationSource.PREMIUM_CACHE -> "精品配音缓存"
+                    com.storybrain.app.data.NarrationSource.SYSTEM_TTS -> "系统中文朗读"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.padding(bottom = 8.dp))
         }
     }

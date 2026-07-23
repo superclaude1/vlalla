@@ -46,6 +46,20 @@ class EdgeTtsProvider(private val client: EdgeTtsClient = EdgeTtsClient()) : Tts
     override suspend fun synthesize(request: TtsSynthesisRequest, output: File) {
         client.synthesize(request.text, request.voice.removePrefix("edge:"), request.directives, output)
     }
+
+    suspend fun synthesize(
+        request: TtsSynthesisRequest,
+        output: File,
+        onStage: (EdgeTransferStage) -> Unit
+    ) {
+        client.synthesize(
+            request.text,
+            request.voice.removePrefix("edge:"),
+            request.directives,
+            output,
+            onStage
+        )
+    }
 }
 
 class FishAudioProvider(

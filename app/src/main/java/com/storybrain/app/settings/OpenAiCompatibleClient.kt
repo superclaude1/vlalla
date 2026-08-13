@@ -1,7 +1,6 @@
 package com.storybrain.app.settings
 
 import java.net.HttpURLConnection
-import java.net.URI
 import java.net.URL
 import java.util.UUID
 import kotlin.coroutines.resume
@@ -320,18 +319,7 @@ class OpenAiCompatibleClient(
         private const val ANALYSIS_READ_TIMEOUT_MS = 180_000
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-        fun normalizeBaseUrl(value: String): String {
-            var url = value.trim().trimEnd('/')
-            require(url.isNotBlank()) { "请输入 API URL" }
-            if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://$url"
-            val uri = URI(url)
-            require(uri.host != null) { "API URL 格式不正确" }
-            require(uri.scheme.equals("https", true)) { "API URL 必须使用 HTTPS，以保护 API Key" }
-            if (uri.host.equals("api.openai.com", ignoreCase = true) && uri.path.trim('/').isBlank()) {
-                url += "/v1"
-            }
-            return url
-        }
+        fun normalizeBaseUrl(value: String): String = ApiEndpointPolicy.normalize(value)
     }
 }
 

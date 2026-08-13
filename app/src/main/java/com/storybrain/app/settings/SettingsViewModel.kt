@@ -105,6 +105,11 @@ fun selectLlmModelDraft(state: SettingsUiState, identity: LlmModelIdentity): Set
 fun selectionAfterProfileDeletion(selectedProfileId: String, deletedProfileId: String): String =
     selectedProfileId.takeUnless { it == deletedProfileId }.orEmpty()
 
+fun normalizeTtsEndpointDraft(kind: String, baseUrl: String): String = when (TtsProviderKind.valueOf(kind)) {
+    TtsProviderKind.FISH_AUDIO, TtsProviderKind.OPENAI_COMPATIBLE -> ApiEndpointPolicy.normalize(baseUrl)
+    TtsProviderKind.EDGE, TtsProviderKind.ANDROID_SYSTEM -> baseUrl.trim()
+}
+
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as StoryBrainApplication).repository
     private val llmStore = LlmSettingsStore(application, repository)
@@ -188,10 +193,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             runCatching {
                 require(snapshot.apiDisplayName.isNotBlank()) { "请输入 API 名称" }
+                val normalizedBaseUrl = ApiEndpointPolicy.normalize(snapshot.baseUrl)
                 val profile = LlmApiProfileEntity(
                     id = UUID.randomUUID().toString(),
                     displayName = snapshot.apiDisplayName,
-                    baseUrl = snapshot.baseUrl,
+                    baseUrl = normalizedBaseUrl,
                     selectedModel = snapshot.selectedModel.takeIf { it in snapshot.detectedModels }.orEmpty()
                 )
                 llmPersistenceMutex.withLock {
@@ -317,9 +323,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     ?: modelsForProfile
                 val selectedModels = (models + snapshot.selectedModel).filter(String::isNotBlank).distinct()
                 llmPersistenceMutex.withLock {
+                    val normalizedBaseUrl = ApiEndpointPolicy.normalize(snapshot.baseUrl)
                     val updatedProfile = current.copy(
                         displayName = snapshot.apiDisplayName,
-                        baseUrl = snapshot.baseUrl,
+                        baseUrl = normalizedBaseUrl,
                         selectedModel = snapshot.selectedModel
                     )
                     repository.saveLlmProfileDraft(updatedProfile, selectedModels) {
@@ -452,9 +459,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val requestId = ++ttsSaveSequence
         viewModelScope.launch {
             runCatching {
+                val normalizedBaseUrl = normalizeTtsEndpointDraft(profile.kind, snapshot.profileBaseUrl)
                 repository.saveTtsProfile(
                     profile.copy(
-                        baseUrl = snapshot.profileBaseUrl,
+                        baseUrl = normalizedBaseUrl,
                         model = snapshot.profileModel,
                         supportsInstructions = snapshot.profileSupportsInstructions
                     )

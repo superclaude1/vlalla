@@ -24,6 +24,8 @@ import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.importer.ImportedNovel
 import com.storybrain.app.importer.NovelStreamImporter
 import com.storybrain.app.export.Neo4jExporter
+import com.storybrain.app.reader.ReaderDisplayMode
+import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
 import com.storybrain.app.settings.RequestStage
@@ -147,6 +149,16 @@ data class MemoryActionUiState(val running: Boolean = false, val message: String
 
 enum class ReaderMode { PLAIN_TEXT, DIALOGUE }
 
+private fun ReaderMode.toPreferenceMode(): ReaderDisplayMode = when (this) {
+    ReaderMode.PLAIN_TEXT -> ReaderDisplayMode.PLAIN_TEXT
+    ReaderMode.DIALOGUE -> ReaderDisplayMode.DIALOGUE
+}
+
+private fun ReaderDisplayMode.toReaderMode(): ReaderMode = when (this) {
+    ReaderDisplayMode.PLAIN_TEXT -> ReaderMode.PLAIN_TEXT
+    ReaderDisplayMode.DIALOGUE -> ReaderMode.DIALOGUE
+}
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as StoryBrainApplication).repository
     private val llmSettings = LlmSettingsStore(application, repository)
@@ -175,7 +187,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var memoryPickerRequestSequence = 0L
     private val _memoryActionState = MutableStateFlow(MemoryActionUiState())
     val memoryActionState = _memoryActionState.asStateFlow()
-    private val _readerMode = MutableStateFlow(ReaderMode.PLAIN_TEXT)
+    private val readerPreferencesStore = ReaderPreferencesStore(application)
+    val readerPreferences = readerPreferencesStore.preferences
+    private val _readerMode = MutableStateFlow(readerPreferences.value.displayMode.toReaderMode())
     val readerMode = _readerMode.asStateFlow()
     private val memoryPreferences = application.getSharedPreferences("memory_library_v3", Application.MODE_PRIVATE)
 
@@ -300,7 +314,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setReaderMode(mode: ReaderMode) {
+        readerPreferencesStore.update { it.withDisplayMode(mode.toPreferenceMode()) }
         _readerMode.value = mode
+    }
+
+    fun adjustReaderFontSize(delta: Int) {
+        readerPreferencesStore.update { it.adjustFontSize(delta) }
     }
 
     @Synchronized

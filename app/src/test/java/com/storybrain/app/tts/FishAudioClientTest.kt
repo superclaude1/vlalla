@@ -6,6 +6,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -59,6 +60,20 @@ class FishAudioClientTest {
         assertEquals("2", request.requestUrl?.queryParameter("page_number"))
         assertEquals("false", request.requestUrl?.queryParameter("self"))
         assertEquals("女声", request.requestUrl?.queryParameter("title"))
+    }
+
+    @Test
+    fun rejectsUnsafeProductionEndpoints() {
+        listOf(
+            "https://user:password@example.com",
+            "https://example.com?api_key=secret",
+            "https://example.com#token",
+            "http://example.com"
+        ).forEach { endpoint ->
+            assertThrows(IllegalArgumentException::class.java) {
+                FishAudioClient(endpoint)
+            }
+        }
     }
 
     @Test

@@ -13,12 +13,26 @@ class ReaderFunctionParityContractTest {
     fun plainTextIsDefaultAndMoreMenuSwitchesBothReaderModes() {
         val viewModel = File("src/main/java/com/storybrain/app/ui/AppViewModel.kt").readText()
         assertTrue(viewModel.contains("enum class ReaderMode { PLAIN_TEXT, DIALOGUE }"))
-        assertTrue(viewModel.contains("MutableStateFlow(ReaderMode.PLAIN_TEXT)"))
+        assertTrue(viewModel.contains("ReaderPreferencesStore(application)"))
+        assertTrue(viewModel.contains("MutableStateFlow(readerPreferences.value.displayMode.toReaderMode())"))
         assertTrue(screens.contains("viewModel.readerMode.collectAsStateWithLifecycle()"))
         assertTrue(screens.contains("Text(\"纯文本模式\")"))
         assertTrue(screens.contains("Text(\"对话模式\")"))
         assertTrue(screens.contains("setReaderMode(ReaderMode.PLAIN_TEXT)"))
         assertTrue(screens.contains("setReaderMode(ReaderMode.DIALOGUE)"))
+    }
+
+    @Test
+    fun readerAppearanceControlsArePersistedAndAppliedToEveryReadingMode() {
+        val viewModel = File("src/main/java/com/storybrain/app/ui/AppViewModel.kt").readText()
+        assertTrue(viewModel.contains("val readerPreferences = readerPreferencesStore.preferences"))
+        assertTrue(viewModel.contains("fun adjustReaderFontSize(delta: Int)"))
+        assertTrue(screens.contains("Text(\"字号\")"))
+        assertTrue(screens.contains("viewModel.adjustReaderFontSize(-1)"))
+        assertTrue(screens.contains("viewModel.adjustReaderFontSize(1)"))
+        assertTrue(screens.contains("fontSize = readerPreferences.fontSizeSp.sp"))
+        assertTrue(screens.contains("lineHeight = readerPreferences.lineHeightSp.sp"))
+        assertTrue(screens.contains("horizontal = readerPreferences.horizontalPaddingDp.dp"))
     }
 
     @Test

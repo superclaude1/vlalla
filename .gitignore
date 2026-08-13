@@ -10,3 +10,4 @@
 .cxx/
 __pycache__/
 *.pyc
+.hermes/

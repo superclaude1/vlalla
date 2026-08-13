@@ -57,6 +57,7 @@ class VoiceResolver(
                 TtsProviderKind.FISH_AUDIO -> "Fish Audio"
                 TtsProviderKind.OPENAI_COMPATIBLE -> "兼容 TTS"
                 TtsProviderKind.EDGE -> "Edge TTS"
+                TtsProviderKind.ANDROID_SYSTEM -> "Android 系统 TTS"
             }
             error("$label 尚未配置${if (character == null) "旁白" else "角色"}音色池")
         }

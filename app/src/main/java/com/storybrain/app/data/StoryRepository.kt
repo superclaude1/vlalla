@@ -4,6 +4,7 @@ import androidx.room.withTransaction
 import com.storybrain.app.importer.ImportedNovel
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import com.storybrain.app.settings.ChatCompletionUsage
 
 class MemorySelectionException(message: String) : Exception(message)
 
@@ -20,6 +21,7 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeChapters(bookId: String) = dao.observeChapters(bookId)
     fun observeChapter(chapterId: String) = dao.observeChapter(chapterId)
     fun observeCharacters(bookId: String) = dao.observeCharacters(bookId)
+    fun observeChapterCharacters(chapterId: String) = dao.observeChapterCharacters(chapterId)
     fun observeRelations(bookId: String) = dao.observeRelations(bookId)
     fun observePlotNodes(bookId: String) = dao.observePlotNodes(bookId)
     fun observeChatMessages(sessionId: String) = dao.observeChatMessages(sessionId)
@@ -30,6 +32,9 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeTtsVoicePool(profileId: String) = dao.observeTtsVoicePool(profileId)
     fun observeBookTtsSetting(bookId: String) = dao.observeBookTtsSetting(bookId)
     fun observeActiveCharacterVoiceBindings(bookId: String) = dao.observeActiveCharacterVoiceBindings(bookId)
+    fun observeTaskEvents() = dao.observeTaskEvents()
+    fun observeLlmApiProfiles() = dao.observeLlmApiProfiles()
+    fun observeLlmModels() = dao.observeLlmModels()
 
     suspend fun getBook(bookId: String) = dao.getBook(bookId)
     suspend fun getBooks() = dao.getBooks()
@@ -46,6 +51,50 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun getActiveCharacterVoiceBinding(characterId: String) = dao.getActiveCharacterVoiceBinding(characterId)
     suspend fun getActiveNarratorBinding(bookId: String) = dao.getActiveNarratorBinding(bookId)
     suspend fun getChatSession(sessionId: String) = dao.getChatSession(sessionId)
+    suspend fun getLlmApiProfiles() = dao.getLlmApiProfiles()
+    suspend fun getLlmApiProfile(profileId: String) = dao.getLlmApiProfile(profileId)
+    suspend fun getLlmModels() = dao.getLlmModels()
+
+    suspend fun saveLlmApiProfile(profile: LlmApiProfileEntity) = dao.upsertLlmApiProfile(
+        profile.copy(
+            displayName = profile.displayName.trim().ifBlank { "LLM API" },
+            baseUrl = profile.baseUrl.trim().trimEnd('/'),
+            updatedAt = System.currentTimeMillis()
+        )
+    )
+
+    suspend fun replaceLlmModels(profileId: String, modelIds: List<String>) = database.withTransaction {
+        dao.deleteLlmModels(profileId)
+        dao.upsertLlmModels(modelIds.map(String::trim).filter(String::isNotBlank).distinct().map {
+            LlmModelEntity(profileId, it)
+        })
+    }
+
+    suspend fun selectLlmModel(profileId: String, modelId: String) =
+        dao.selectLlmModel(profileId, modelId.trim(), System.currentTimeMillis())
+
+    suspend fun deleteLlmProfile(profileId: String) = database.withTransaction {
+        dao.deleteLlmModels(profileId)
+        dao.deleteLlmApiProfile(profileId)
+    }
+
+    suspend fun saveLlmProfileDraft(
+        profile: LlmApiProfileEntity,
+        modelIds: List<String>,
+        mustStillBeCurrent: () -> Unit
+    ) = database.withTransaction {
+        mustStillBeCurrent()
+        dao.upsertLlmApiProfile(profile.copy(
+            displayName = profile.displayName.trim().ifBlank { "LLM API" },
+            baseUrl = profile.baseUrl.trim().trimEnd('/'),
+            updatedAt = System.currentTimeMillis()
+        ))
+        mustStillBeCurrent()
+        dao.deleteLlmModels(profile.id)
+        dao.upsertLlmModels(modelIds.map(String::trim).filter(String::isNotBlank).distinct().map {
+            LlmModelEntity(profile.id, it)
+        })
+    }
     suspend fun getRecentChatMessages(sessionId: String, limit: Int = 40) =
         dao.getRecentChatMessages(sessionId, limit).reversed()
 
@@ -77,8 +126,98 @@ class StoryRepository(private val database: AppDatabase) {
         return bookId
     }
 
+    suspend fun recordTaskFailure(
+        taskType: TaskRunType,
+        targetId: String,
+        eventType: String,
+        stage: String,
+        retryable: Boolean,
+        statusCode: Int?,
+        attempt: Int,
+        message: String
+    ) {
+        val now = System.currentTimeMillis()
+        val runId = UUID.randomUUID().toString()
+        database.withTransaction {
+            dao.insertTaskRun(TaskRunEntity(runId, taskType.name, targetId, TaskRunStatus.FAILED.name, now, now))
+            dao.insertTaskEvent(
+                TaskEventEntity(
+                    id = UUID.randomUUID().toString(),
+                    runId = runId,
+                    taskType = taskType.name,
+                    targetId = targetId,
+                    eventType = eventType,
+                    stage = stage,
+                    retryable = retryable,
+                    statusCode = statusCode,
+                    attempt = attempt.coerceAtLeast(1),
+                    message = message.take(240),
+                    createdAt = now
+                )
+            )
+        }
+    }
+
+    suspend fun startTaskRun(taskType: TaskRunType, targetId: String): String {
+        val runId = UUID.randomUUID().toString()
+        dao.insertTaskRun(TaskRunEntity(runId, taskType.name, targetId, createdAt = System.currentTimeMillis()))
+        return runId
+    }
+
+    suspend fun finishTaskRun(runId: String, status: TaskRunStatus) =
+        dao.finishTaskRun(runId, status.name, System.currentTimeMillis())
+
+    suspend fun recordTaskFailure(
+        runId: String,
+        taskType: TaskRunType,
+        targetId: String,
+        eventType: String,
+        stage: String,
+        retryable: Boolean,
+        statusCode: Int?,
+        attempt: Int,
+        message: String
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            dao.insertTaskEvent(TaskEventEntity(
+                id = UUID.randomUUID().toString(), runId = runId, taskType = taskType.name,
+                targetId = targetId, eventType = eventType, stage = stage, retryable = retryable,
+                statusCode = statusCode, attempt = attempt.coerceAtLeast(1),
+                message = message.take(240), createdAt = now
+            ))
+            dao.finishTaskRun(runId, TaskRunStatus.FAILED.name, now)
+        }
+    }
+
+    suspend fun recordTaskUsage(
+        runId: String,
+        taskType: TaskRunType,
+        targetId: String,
+        batchIndex: Int,
+        usage: ChatCompletionUsage,
+        requestId: String,
+        responseModel: String?
+    ) {
+        val now = System.currentTimeMillis()
+        dao.insertTaskEvent(TaskEventEntity(
+            id = UUID.randomUUID().toString(), runId = runId, taskType = taskType.name,
+            targetId = targetId, eventType = "USAGE", stage = "RESPONSE", retryable = false,
+            attempt = batchIndex.coerceAtLeast(1), message = "批次 $batchIndex usage", createdAt = now,
+            promptTokens = usage.promptTokens, completionTokens = usage.completionTokens,
+            totalTokens = usage.totalTokens, usageQuality = usage.quality.name,
+            requestId = requestId, responseModel = responseModel
+        ))
+    }
+
+    suspend fun clearTaskEvents() = database.withTransaction {
+        dao.clearTaskEvents()
+        dao.clearTaskRuns()
+    }
+
     suspend fun updateReadingProgress(bookId: String, chapterIndex: Int) =
         dao.updateReadingProgress(bookId, chapterIndex)
+
 
     suspend fun updateTtsStatus(chapterId: String, status: TaskStatus) =
         dao.updateTtsStatus(chapterId, status.name)
@@ -93,7 +232,8 @@ class StoryRepository(private val database: AppDatabase) {
         val defaults = listOf(
             TtsProviderProfileEntity(TtsProfileIds.EDGE, TtsProviderKind.EDGE.name, "Edge TTS", "", "edge-online"),
             TtsProviderProfileEntity(TtsProfileIds.FISH, TtsProviderKind.FISH_AUDIO.name, "Fish Audio", "https://api.fish.audio", "s2.1-pro-free"),
-            TtsProviderProfileEntity(TtsProfileIds.OPENAI, TtsProviderKind.OPENAI_COMPATIBLE.name, "OpenAI-compatible", "https://api.openai.com/v1", "tts-1")
+            TtsProviderProfileEntity(TtsProfileIds.OPENAI, TtsProviderKind.OPENAI_COMPATIBLE.name, "OpenAI-compatible", "https://api.openai.com/v1", "tts-1"),
+            TtsProviderProfileEntity(TtsProfileIds.ANDROID_SYSTEM, TtsProviderKind.ANDROID_SYSTEM.name, "Android 系统 TTS", "", "android-system")
         )
         defaults.forEach { if (dao.getTtsProfile(it.id) == null) dao.upsertTtsProfile(it) }
         if (dao.getTtsVoicePool(TtsProfileIds.EDGE).isEmpty()) {
@@ -110,6 +250,19 @@ class StoryRepository(private val database: AppDatabase) {
                     edgeVoice("zh-CN-YunxiNeural", "云希", TtsVoiceRole.UNKNOWN, "MALE", now)
                 )
             )
+        }
+        if (dao.getTtsVoicePool(TtsProfileIds.ANDROID_SYSTEM).isEmpty()) {
+            dao.upsertTtsVoicePool(listOf(
+                TtsProfileVoicePoolEntity(
+                    profileId = TtsProfileIds.ANDROID_SYSTEM,
+                    voiceId = "android-system-default-zh",
+                    role = TtsVoiceRole.NARRATOR.name,
+                    voiceName = "系统中文（自动选择）",
+                    language = "zh",
+                    source = "BUILT_IN",
+                    updatedAt = System.currentTimeMillis()
+                )
+            ))
         }
     }
 
@@ -141,6 +294,9 @@ class StoryRepository(private val database: AppDatabase) {
         dao.deactivateNarratorBindings(binding.bookId)
         dao.upsertNarratorBinding(binding.copy(active = true, updatedAt = System.currentTimeMillis()))
     }
+
+    suspend fun clearNarratorBinding(bookId: String) = dao.deactivateNarratorBindings(bookId)
+    fun observeActiveNarratorBinding(bookId: String) = dao.observeActiveNarratorBinding(bookId)
 
     suspend fun getTtsScript(chapterId: String) = dao.getTtsScript(chapterId)
     suspend fun getTtsScriptSegments(scriptId: String) = dao.getTtsScriptSegments(scriptId)
@@ -207,17 +363,24 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun updateAnalysisStatus(chapterIds: List<String>, status: TaskStatus) =
         dao.updateAnalysisStatus(chapterIds, status.name)
 
+    suspend fun updateRunningAnalysisStatus(chapterIds: List<String>, status: TaskStatus) =
+        dao.updateRunningAnalysisStatus(chapterIds, status.name)
+
     suspend fun saveAnalysisDelta(
         bookId: String,
         completed: Int,
+        chapterIds: List<String>,
         characters: List<StoryCharacterEntity>,
         relations: List<StoryRelationEntity>,
-        nodes: List<PlotNodeEntity>
+        nodes: List<PlotNodeEntity>,
+        mentions: List<ChapterCharacterMentionEntity> = emptyList()
     ) = database.withTransaction {
         dao.insertCharacters(characters)
+        dao.insertChapterCharacterMentions(mentions)
         dao.insertRelations(relations)
         dao.insertPlotNodes(nodes)
         dao.updateAnalysisCompleted(bookId, completed)
+        dao.updateAnalysisStatus(chapterIds, TaskStatus.COMPLETED.name)
         syncMemories(bookId, relations, nodes, dao.getCharacters(bookId))
     }
 
@@ -295,6 +458,9 @@ class StoryRepository(private val database: AppDatabase) {
 
     suspend fun saveMemory(memory: MemoryItemEntity) = database.withTransaction { upsertIndexedMemory(memory) }
 
+    suspend fun saveCharacterMemoryEvidence(evidence: CharacterMemoryEvidenceEntity) =
+        dao.upsertCharacterMemoryEvidence(listOf(evidence))
+
     suspend fun createMemory(
         bookId: String,
         type: MemoryType,
@@ -304,9 +470,12 @@ class StoryRepository(private val database: AppDatabase) {
         chapterEndIndex: Int? = chapterStartIndex,
         characterIds: List<String> = emptyList()
     ): MemoryItemEntity {
-        val cleanContent = content.trim().take(2_000)
+        val cleanContent = content.trim()
         require(cleanContent.isNotBlank()) { "记忆内容不能为空" }
         val cleanTitle = title.trim().ifBlank { cleanContent.take(20) }.take(60)
+        require(dao.getMemories(bookId).none {
+            it.editable && it.type == type.name && it.chapterStartIndex == chapterStartIndex && it.content == cleanContent
+        }) { "这段内容已经保存为记忆" }
         val now = System.currentTimeMillis()
         return MemoryItemEntity(
             id = UUID.randomUUID().toString(),
@@ -329,7 +498,7 @@ class StoryRepository(private val database: AppDatabase) {
         require(memory.editable) { "自动分析记忆不能直接修改" }
         val updated = memory.copy(
             title = memory.title.trim().take(60),
-            content = memory.content.trim().take(2_000),
+            content = memory.content.trim(),
             searchTerms = MemorySearch.terms(memory.title, memory.content),
             updatedAt = System.currentTimeMillis()
         )
@@ -347,6 +516,23 @@ class StoryRepository(private val database: AppDatabase) {
         val previous = dao.getMemory(memory.id)
         val stable = memory.copy(createdAt = previous?.createdAt ?: memory.createdAt)
         dao.upsertMemory(stable)
+        val characterIds = MemorySearch.jsonStrings(stable.characterIdsJson)
+        if (characterIds.isNotEmpty()) {
+            dao.upsertCharacterMemoryEvidence(
+                characterIds.map { characterId ->
+                    CharacterMemoryEvidenceEntity(
+                        memoryId = stable.id,
+                        characterId = characterId,
+                        chapterStartIndex = stable.chapterStartIndex,
+                        chapterEndIndex = stable.chapterEndIndex,
+                        characterIdsJson = stable.characterIdsJson,
+                        source = if (stable.editable) MemoryEvidenceSource.USER.name else MemoryEvidenceSource.ANALYSIS.name,
+                        confidence = if (stable.editable) 1f else 0.5f,
+                        spoilerBoundaryChapterIndex = stable.chapterEndIndex ?: stable.chapterStartIndex
+                    )
+                }
+            )
+        }
         dao.deleteMemoryFts(stable.id)
         dao.insertMemoryFts(MemoryFtsEntity(stable.id, stable.title, stable.content, stable.searchTerms))
     }
@@ -435,6 +621,38 @@ class StoryRepository(private val database: AppDatabase) {
                 } else {
                     used to kept
                 }
+            }
+            .last().second
+            .mapTo(mutableSetOf()) { it.id }
+        return SelectedMemoryGroups(
+            defaultMemories = defaults.filter { it.id in allowedIds },
+            sessionMemories = session.filter { it.id in allowedIds }
+        )
+    }
+
+    suspend fun getCharacterMemoriesForChat(
+        bookId: String,
+        characterId: String,
+        sessionId: String,
+        readingProgress: Int
+    ): SelectedMemoryGroups {
+        val defaults = dao.getDefaultMemoriesForChat(bookId, characterId, readingProgress)
+        val defaultIds = defaults.mapTo(mutableSetOf()) { it.id }
+        val session = dao.getSessionMemoriesForChat(bookId, characterId, sessionId, readingProgress)
+            .filterNot { it.id in defaultIds }
+        return limitSelectedMemoryGroups(defaults, session)
+    }
+
+    private fun limitSelectedMemoryGroups(
+        defaults: List<MemoryItemEntity>,
+        session: List<MemoryItemEntity>
+    ): SelectedMemoryGroups {
+        val allowedIds = (defaults + session)
+            .distinctBy { it.id }
+            .take(MAX_SELECTED_MEMORIES)
+            .runningFold(0 to emptyList<MemoryItemEntity>()) { (used, kept), memory ->
+                if (used + memory.content.length <= MAX_MEMORY_CHARS) used + memory.content.length to (kept + memory)
+                else used to kept
             }
             .last().second
             .mapTo(mutableSetOf()) { it.id }

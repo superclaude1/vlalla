@@ -1,9 +1,9 @@
 <resources>
     <style name="Theme.StoryBrain" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
-        <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">#F8F7FC</item>
-        <item name="android:navigationBarColor">#F8F7FC</item>
+        <item name="android:statusBarColor">#101010</item>
+        <item name="android:navigationBarColor">#101010</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
 

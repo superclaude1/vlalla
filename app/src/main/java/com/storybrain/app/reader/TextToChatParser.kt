@@ -9,40 +9,64 @@ sealed interface ReadingBlock {
 
 object TextToChatParser {
     private val quote = Regex("[“「『](.*?)[”」』]", setOf(RegexOption.DOT_MATCHES_ALL))
-    private const val speechVerbPattern = "(?:回答道|回应道|开口道|说道|问道|答道|喊道|叫道|吼道|回答|回应|开口|说|问|道|喊|答|叫|吼|嘀咕)"
+    private const val speechVerbPattern = "(?:回答道|回应道|开口道|说道|问道|答道|喊道|叫道|吼道|叹道|回答|回应|开口|说|问|道|喊|答|叫|吼|嘀咕)"
     private val speechVerb = Regex(speechVerbPattern)
     private val speakerBefore = Regex("""([\u4e00-\u9fa5·]{1,10}?)(?:轻声|低声|大声|忽然|缓缓|冷冷|笑着|哭着)?(?:地)?$speechVerbPattern[：:,，\s]*$""")
     private val speakerAfter = Regex("""^\s*[,，。！？!?]*(?:是)?([\u4e00-\u9fa5·]{1,10}?)(?:轻声|低声|大声|忽然|缓缓|冷冷|笑着|哭着)?(?:地)?$speechVerbPattern""")
 
     /** knownSpeakers maps canonical names and aliases to the canonical character name. */
     fun parse(text: String, knownSpeakers: Map<String, String> = emptyMap()): List<ReadingBlock> {
+        val matches = quote.findAll(text).toList()
+        if (matches.isEmpty()) return parseUnquotedColon(text, knownSpeakers)
         val blocks = mutableListOf<ReadingBlock>()
         var cursor = 0
-        var lastKnownSpeaker = "未识别角色"
         val aliases = knownSpeakers.keys.filter { it.isNotBlank() }.sortedByDescending { it.length }
-        quote.findAll(text).forEach { match ->
+        matches.forEach { match ->
             if (match.range.first > cursor) {
                 val narration = text.substring(cursor, match.range.first)
-                splitNarration(narration).forEach { blocks += ReadingBlock.Narration(it) }
+                parseUnquotedColon(narration, knownSpeakers).forEach { blocks += it }
             }
             val beforeStart = (match.range.first - 80).coerceAtLeast(0)
             val afterEnd = (match.range.last + 81).coerceAtMost(text.length)
             val before = text.substring(beforeStart, match.range.first)
             val after = text.substring(match.range.last + 1, afterEnd)
             val guessed = speakerBefore.find(before)?.groupValues?.get(1)
-                ?: speakerAfter.find(after)?.groupValues?.get(1)
-            val speaker = resolveKnownSpeaker(guessed, knownSpeakers)
-                ?: findKnownSpeakerNearby(before, after, aliases, knownSpeakers)
-                ?: guessed
-                ?: lastKnownSpeaker
-            if (speaker != "未识别角色") lastKnownSpeaker = speaker
-            blocks += ReadingBlock.Dialogue(speaker, match.groupValues[1].trim())
+                ?: speakerAfter.find(after)?.groupValues?.get(1)?.takeIf(::isLikelySpeaker)
+            val nearbySpeaker = findKnownSpeakerNearby(before, after, aliases, knownSpeakers)
+            val hasDialogueCue = guessed != null || nearbySpeaker != null ||
+                before.trimEnd().endsWith("：") || before.trimEnd().endsWith(":")
+            if (hasDialogueCue) {
+                val speaker = resolveKnownSpeaker(guessed, knownSpeakers)
+                    ?: nearbySpeaker
+                    ?: guessed
+                    ?: "未识别角色"
+                blocks += ReadingBlock.Dialogue(speaker, match.groupValues[1].trim())
+            } else {
+                blocks += ReadingBlock.Narration(match.value)
+            }
             cursor = match.range.last + 1
         }
         if (cursor < text.length) {
-            splitNarration(text.substring(cursor)).forEach { blocks += ReadingBlock.Narration(it) }
+            parseUnquotedColon(text.substring(cursor), knownSpeakers).forEach { blocks += it }
         }
         return blocks.filter { it.text.isNotBlank() }
+    }
+
+    private fun parseUnquotedColon(
+        text: String,
+        knownSpeakers: Map<String, String>
+    ): List<ReadingBlock> {
+        val markers = Regex("(?s)(?:^|(?<=[。！？!?；;\\n]))\\s*([\\u4e00-\\u9fa5·]{1,10})[：:]").findAll(text).toList()
+        if (markers.isEmpty()) return splitNarration(text).map(ReadingBlock::Narration)
+        return buildList {
+            val first = markers.first()
+            splitNarration(text.substring(0, first.range.first)).forEach { add(ReadingBlock.Narration(it)) }
+            markers.forEachIndexed { index, marker ->
+                val speaker = resolveKnownSpeaker(marker.groupValues[1], knownSpeakers) ?: marker.groupValues[1]
+                val end = markers.getOrNull(index + 1)?.range?.first ?: text.length
+                add(ReadingBlock.Dialogue(speaker, text.substring(marker.range.last + 1, end).trim()))
+            }
+        }.filter { it.text.isNotBlank() }
     }
 
     private fun resolveKnownSpeaker(candidate: String?, knownSpeakers: Map<String, String>): String? {
@@ -53,6 +77,9 @@ object TextToChatParser {
             .maxByOrNull { it.key.length }
             ?.value
     }
+
+    private fun isLikelySpeaker(candidate: String): Boolean =
+        candidate.isNotBlank() && listOf("没有人", "有人", "大家", "众人", "人们").none(candidate::contains)
 
     private fun findKnownSpeakerNearby(
         before: String,
@@ -100,7 +127,13 @@ object TextToChatParser {
                     output += current.toString()
                     current = StringBuilder()
                 }
-                sentence.chunked(targetLength).forEach { output += it }
+                var start = 0
+                while (start < sentence.length) {
+                    var end = minOf(start + targetLength, sentence.length)
+                    while (end < sentence.length && sentence[end] in "，。！？!?；;：:") end++
+                    output += sentence.substring(start, end)
+                    start = end
+                }
             } else {
                 current.append(sentence)
             }

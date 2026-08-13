@@ -8,7 +8,7 @@ import com.storybrain.app.settings.LlmMessage
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.OpenAiCompatibleClient
 import java.util.UUID
-import kotlinx.coroutines.flow.first
+
 
 class CharacterChatService(
     private val repository: StoryRepository,
@@ -18,9 +18,8 @@ class CharacterChatService(
     suspend fun send(bookId: String, characterId: String, sessionId: String, userText: String): String {
         val text = userText.trim()
         require(text.isNotBlank()) { "请输入要和角色说的话" }
-        val config = settings.config.first()
-        val apiKey = settings.readApiKey()
-        require(config.model.isNotBlank()) { "请先在设置中检测并选择模型" }
+        val profile = settings.snapshot()
+        require(profile.modelId.isNotBlank()) { "请先在设置中检测并选择模型" }
 
         val book = repository.getBook(bookId) ?: error("找不到这本小说")
         val character = repository.getCharacters(bookId).firstOrNull { it.id == characterId }
@@ -41,7 +40,12 @@ class CharacterChatService(
             )
         )
         repository.titleSessionFromFirstMessage(sessionId, text)
-        val selectedMemories = repository.getSelectedMemoryGroups(characterId, sessionId, book.analysisCompleted)
+        val selectedMemories = repository.getCharacterMemoriesForChat(
+            bookId,
+            characterId,
+            sessionId,
+            book.currentChapterIndex
+        )
         val history = trimChatHistory(repository.getRecentChatMessages(sessionId), StoryRepository.MAX_HISTORY_CHARS)
         val prompt = CharacterPromptBuilder.build(
             character,
@@ -51,9 +55,9 @@ class CharacterChatService(
             selectedMemories.sessionMemories
         )
         val response = client.chatCompletion(
-            baseUrl = config.baseUrl,
-            apiKey = apiKey,
-            model = config.model,
+            baseUrl = profile.baseUrl,
+            apiKey = profile.apiKey,
+            model = profile.modelId,
             messages = buildList {
                 add(LlmMessage("system", prompt))
                 history.forEach { message -> add(LlmMessage(message.role, message.content)) }

@@ -5,6 +5,33 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
+@Entity(tableName = "llm_api_profiles", indices = [Index("updatedAt")])
+data class LlmApiProfileEntity(
+    @PrimaryKey val id: String,
+    val displayName: String,
+    val baseUrl: String,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = createdAt,
+    val selectedModel: String = ""
+)
+
+@Entity(
+    tableName = "llm_models",
+    primaryKeys = ["apiProfileId", "modelId"],
+    foreignKeys = [ForeignKey(
+        entity = LlmApiProfileEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["apiProfileId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("apiProfileId")]
+)
+data class LlmModelEntity(
+    val apiProfileId: String,
+    val modelId: String,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
 @Entity(tableName = "books")
 data class BookEntity(
     @PrimaryKey val id: String,
@@ -62,6 +89,38 @@ data class StoryCharacterEntity(
     val confidence: Float = 0f,
     val importanceScore: Float = 0f,
     val importanceReason: String = ""
+)
+
+@Entity(
+    tableName = "chapter_character_mentions",
+    foreignKeys = [
+        ForeignKey(
+            entity = ChapterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = StoryCharacterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["characterId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [
+        Index("chapterId"),
+        Index("characterId"),
+        Index(value = ["chapterId", "characterId", "sourceHash", "analysisVersion"], unique = true)
+    ]
+)
+data class ChapterCharacterMentionEntity(
+    @PrimaryKey val id: String,
+    val chapterId: String,
+    val characterId: String,
+    val evidence: String,
+    val confidence: Float,
+    val sourceHash: String,
+    val analysisVersion: Int
 )
 
 @Entity(
@@ -130,4 +189,48 @@ data class ChatMessageEntity(
     val createdAt: Long
 )
 
-enum class TaskStatus { PENDING, QUEUED, RUNNING, COMPLETED, FAILED }
+enum class TaskStatus { PENDING, QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED }
+
+enum class TaskRunType { ANALYSIS, TTS }
+
+enum class TaskRunStatus { RUNNING, FAILED, COMPLETED, CANCELLED }
+
+@Entity(tableName = "task_runs", indices = [Index("createdAt"), Index("taskType")])
+data class TaskRunEntity(
+    @PrimaryKey val id: String,
+    val taskType: String,
+    val targetId: String,
+    val status: String = TaskRunStatus.RUNNING.name,
+    val createdAt: Long,
+    val finishedAt: Long? = null
+)
+
+@Entity(
+    tableName = "task_events",
+    foreignKeys = [ForeignKey(
+        entity = TaskRunEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["runId"],
+        onDelete = ForeignKey.CASCADE
+    )],
+    indices = [Index("runId"), Index("createdAt"), Index("eventType")]
+)
+data class TaskEventEntity(
+    @PrimaryKey val id: String,
+    val runId: String,
+    val taskType: String,
+    val targetId: String,
+    val eventType: String,
+    val stage: String,
+    val retryable: Boolean,
+    val statusCode: Int? = null,
+    val attempt: Int = 1,
+    val message: String,
+    val createdAt: Long,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val totalTokens: Int? = null,
+    val usageQuality: String? = null,
+    val requestId: String? = null,
+    val responseModel: String? = null
+)

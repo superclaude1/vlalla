@@ -40,7 +40,7 @@ class FishAudioClientTest {
             }""".trimIndent()
         ))
 
-        val result = FishAudioClient(server.url("/").toString()).listVoices(
+        val result = FishAudioClient(server.url("/").toString(), allowInsecureForTests = true).listVoices(
             apiKey = "secret",
             self = false,
             query = "女声",
@@ -63,16 +63,16 @@ class FishAudioClientTest {
 
     @Test
     fun synthesizesDirectedAudioAndWritesAtomically() {
-        val audio = "ID3-fish-audio".toByteArray()
+        val audio = "RIFF-fish-audio".toByteArray()
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setHeader("Content-Type", "audio/mpeg")
+                .setHeader("Content-Type", "audio/wav; charset=binary")
                 .setBody(okio.Buffer().write(audio))
         )
-        val output = File(temporaryFolder.root, "fish.mp3")
+        val output = File(temporaryFolder.root, "fish.audio")
 
-        FishAudioClient(server.url("/").toString()).synthesize(
+        val artifact = FishAudioClient(server.url("/").toString(), allowInsecureForTests = true).synthesize(
             TtsSynthesisRequest(
                 text = "你好",
                 voice = "fish:voice-1",
@@ -86,6 +86,9 @@ class FishAudioClientTest {
 
         assertTrue(output.exists())
         assertTrue(audio.contentEquals(output.readBytes()))
+        assertEquals("audio/wav", artifact.mimeType)
+        assertEquals("wav", artifact.format)
+        assertEquals("wav", artifact.fileExtension())
         val request = server.takeRequest()
         assertEquals("/v1/tts", request.path)
         assertEquals("Bearer secret", request.getHeader("Authorization"))
@@ -93,6 +96,7 @@ class FishAudioClientTest {
         val body = JSONObject(request.body.readUtf8())
         assertEquals("[happy]你好[break]", body.getString("text"))
         assertEquals("voice-1", body.getString("reference_id"))
+        assertEquals("mp3", body.getString("format"))
         assertEquals(1.32, body.getJSONObject("prosody").getDouble("speed"), 0.001)
     }
 }

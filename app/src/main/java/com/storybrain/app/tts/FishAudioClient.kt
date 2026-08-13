@@ -14,13 +14,16 @@ data class FishVoicePage(val total: Int, val voices: List<TtsVoice>)
 
 class FishAudioClient(
     baseUrl: String = "https://api.fish.audio",
+    allowInsecureForTests: Boolean = false,
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) {
-    private val baseUrl = baseUrl.trim().trimEnd('/')
+    private val baseUrl = baseUrl.trim().trimEnd('/').also {
+        require(allowInsecureForTests || it.startsWith("https://", true)) { "Fish Audio URL 必须使用 HTTPS" }
+    }
 
     fun listModels(): List<String> = listOf("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1")
 
@@ -70,13 +73,13 @@ class FishAudioClient(
 
     fun test(apiKey: String): Int = listVoices(apiKey, self = true, pageSize = 1).total
 
-    fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File) {
+    fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File): TtsAudioArtifact {
         require(request.voice.isNotBlank()) { "Fish Audio 需要选择音色" }
         val directedText = TtsDirectiveRenderer.fishText(request.text, request.directives)
         val body = JSONObject()
             .put("text", directedText)
             .put("reference_id", request.voice.removePrefix("fish:"))
-            .put("format", request.format)
+            .put("format", request.format.takeUnless { it.equals("auto", ignoreCase = true) }.orEmpty().ifBlank { "mp3" })
             .put("normalize", true)
             .put("latency", "normal")
             .put("prosody", JSONObject()
@@ -87,10 +90,10 @@ class FishAudioClient(
             .header("model", request.model)
             .post(body.toString().toRequestBody(JSON))
             .build()
-        download(httpRequest, output)
+        return download(httpRequest, output)
     }
 
-    private fun download(request: Request, output: File) {
+    private fun download(request: Request, output: File): TtsAudioArtifact =
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw error(response.code, response.body?.string())
             val contentType = response.header("Content-Type").orEmpty()
@@ -101,8 +104,8 @@ class FishAudioClient(
             if (part.length() == 0L) { part.delete(); throw TtsProviderException(response.code, true, "Fish Audio 返回空音频") }
             if (output.exists()) output.delete()
             if (!part.renameTo(output)) { part.delete(); throw TtsProviderException(null, false, "无法保存 Fish Audio 音频") }
+            artifactForAudio(output, contentType)
         }
-    }
 
     private fun executeJson(request: Request): JSONObject = client.newCall(request).execute().use { response ->
         val text = response.body?.string().orEmpty()

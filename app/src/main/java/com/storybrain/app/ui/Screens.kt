@@ -7,7 +7,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,9 +34,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AutoStories
 import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudSync
@@ -48,7 +51,6 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.SortByAlpha
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
@@ -64,9 +66,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -76,12 +78,15 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import com.storybrain.app.analysis.ReaderSpeakerPolicy
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -100,8 +105,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.storybrain.app.data.BookEntity
 import com.storybrain.app.R
@@ -115,6 +122,8 @@ import com.storybrain.app.data.StoryCharacterEntity
 import com.storybrain.app.data.StoryRelationEntity
 import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
+import com.storybrain.app.reader.ReaderParagraphs
+import com.storybrain.app.reader.ReaderPagerPolicy
 import com.storybrain.app.reader.ReadingBlock
 import com.storybrain.app.reader.TextToChatParser
 import org.json.JSONArray
@@ -122,20 +131,19 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
+private val TXT_MIME_TYPES = arrayOf("text/plain", "application/octet-stream")
+
 @Composable
 fun LibraryScreen(
     viewModel: AppViewModel,
     onImportStarted: () -> Unit,
     onOpenBook: (String) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSearch: () -> Unit
 ) {
     val books by viewModel.books.collectAsStateWithLifecycle(initialValue = emptyList())
-    var libraryQuery by rememberSaveable { mutableStateOf("") }
-    var sortByTitle by rememberSaveable { mutableStateOf(false) }
-    val visibleBooks = remember(books, libraryQuery, sortByTitle) {
-        books.filter { it.title.contains(libraryQuery, true) }
-            .let { list -> if (sortByTitle) list.sortedBy { it.title.lowercase() } else list }
-    }
+    var sortMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var sortOrder by rememberSaveable { mutableStateOf(LibrarySortOrder.IMPORTED_TIME) }
+    val visibleBooks = remember(books, sortOrder) { sortLibraryBooks(books, sortOrder) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             viewModel.loadNovel(uri)
@@ -146,62 +154,54 @@ fun LibraryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Column {
-                        Text("章境", fontWeight = FontWeight.Bold)
-                        Text("让每一本小说成为可探索的世界", style = MaterialTheme.typography.labelSmall)
-                    }
-                },
+                modifier = Modifier.height(ReactReferenceContract.topBarHeightDp.dp),
+                title = { Text("书架", fontWeight = FontWeight.Bold) },
                 actions = {
-                    IconButton(onClick = { sortByTitle = !sortByTitle }) {
-                        Icon(Icons.Rounded.SortByAlpha, if (sortByTitle) "按导入时间排序" else "按书名排序")
+                    Box {
+                        IconButton(onClick = { sortMenuExpanded = true }) {
+                            Icon(Icons.AutoMirrored.Rounded.Sort, "书架排序")
+                        }
+                        DropdownMenu(
+                            expanded = sortMenuExpanded,
+                            onDismissRequest = { sortMenuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("按导入时间") },
+                                onClick = {
+                                    sortOrder = LibrarySortOrder.IMPORTED_TIME
+                                    sortMenuExpanded = false
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("按书名") },
+                                onClick = {
+                                    sortOrder = LibrarySortOrder.TITLE
+                                    sortMenuExpanded = false
+                                }
+                            )
+                        }
                     }
-                    IconButton(onClick = { launcher.launch(arrayOf("text/plain", "application/octet-stream")) }) {
+                    IconButton(onClick = onOpenSearch) {
+                        Icon(Icons.Rounded.Search, "搜索小说")
+                    }
+                    IconButton(onClick = { launcher.launch(TXT_MIME_TYPES) }) {
                         Icon(Icons.Rounded.Add, contentDescription = "导入小说")
                     }
                 }
             )
-        },
-        bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = true,
-                    onClick = {},
-                    icon = { Icon(Icons.Rounded.AutoStories, null) },
-                    label = { Text("书架") }
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = onOpenSettings,
-                    icon = { Icon(Icons.Rounded.Settings, null) },
-                    label = { Text("设置") }
-                )
-            }
         }
     ) { padding ->
         if (books.isEmpty()) {
             EmptyLibrary(
                 modifier = Modifier.padding(padding),
-                onImport = { launcher.launch(arrayOf("text/plain", "application/octet-stream")) }
+                onImport = { launcher.launch(TXT_MIME_TYPES) }
             )
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
-                item {
-                    Text("我的书架", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(
-                        value = libraryQuery,
-                        onValueChange = { libraryQuery = it.take(60) },
-                        leadingIcon = { Icon(Icons.Rounded.Search, null) },
-                        label = { Text("搜索书名") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
                 items(visibleBooks, key = { it.id }) { book ->
                     val bookChapters by viewModel.chapters(book.id).collectAsStateWithLifecycle(initialValue = emptyList())
                     BookCard(
@@ -210,7 +210,6 @@ fun LibraryScreen(
                         onClick = { onOpenBook(book.id) }
                     )
                 }
-                if (visibleBooks.isEmpty()) item { Text("没有匹配的小说", modifier = Modifier.padding(24.dp)) }
             }
         }
     }
@@ -223,63 +222,99 @@ private fun EmptyLibrary(modifier: Modifier, onImport: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        androidx.compose.foundation.Image(
-            painter = painterResource(R.drawable.story_brain_cover),
-            contentDescription = "章境封面",
-            modifier = Modifier.size(width = 190.dp, height = 250.dp).clip(RoundedCornerShape(24.dp)),
-            contentScale = ContentScale.Crop
-        )
-        Spacer(Modifier.height(24.dp))
-        Text("导入你的第一本小说", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text("自动分章、聊天式阅读、角色配音与动态故事图谱", style = MaterialTheme.typography.bodyMedium)
+        Text(ReactReferenceContract.emptyLibraryContent[0], style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(24.dp))
         Button(onClick = onImport) {
             Icon(Icons.Rounded.UploadFile, null)
             Spacer(Modifier.width(8.dp))
-            Text("选择 TXT 文件")
+            Text(ReactReferenceContract.emptyLibraryContent[1])
+        }
+    }
+}
+
+@Composable
+fun SearchScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenBook: (String) -> Unit) {
+    val books by viewModel.books.collectAsStateWithLifecycle(initialValue = emptyList())
+    var query by rememberSaveable { mutableStateOf("") }
+    val results = remember(books, query) {
+        if (query.isBlank()) emptyList() else books.filter { it.title.contains(query.trim(), ignoreCase = true) }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                modifier = Modifier.height(ReactReferenceContract.topBarHeightDp.dp),
+                title = {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        if (query.isBlank()) Text("搜索书名", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        BasicTextField(
+                            value = query,
+                            onValueChange = { query = it.take(60) },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } }
+            )
+        }
+    ) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(horizontal = 16.dp)) {
+            items(results, key = { it.id }) { book ->
+                val chapters by viewModel.chapters(book.id).collectAsStateWithLifecycle(initialValue = emptyList())
+                BookCard(book, chapters.count { it.ttsStatus == TaskStatus.COMPLETED.name }) { onOpenBook(book.id) }
+            }
+            if (query.isNotBlank() && results.isEmpty()) item { Text("没有匹配的小说", Modifier.padding(vertical = 24.dp)) }
         }
     }
 }
 
 @Composable
 private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
-    Card(onClick = onClick, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(width = 64.dp, height = 88.dp).clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.story_brain_cover),
-                    contentDescription = "${book.title} 封面",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            }
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(6.dp))
-                Text("${book.chapterCount}章 · ${formatChars(book.totalChars)}", style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(10.dp))
-                LinearProgressIndicator(
-                    progress = { if (book.chapterCount == 0) 0f else (book.currentChapterIndex + 1f) / book.chapterCount },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(4.dp))
-                Text("读到第 ${book.currentChapterIndex + 1} 章", style = MaterialTheme.typography.labelSmall)
-                Text("已分析 ${book.analysisCompleted}/${book.chapterCount} 章 · 已配音 $ttsCompleted 章", style = MaterialTheme.typography.labelSmall)
-            }
-            Icon(Icons.Rounded.ChevronRight, null)
+    Row(
+        Modifier.fillMaxWidth().height(96.dp).clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(
+                width = ReactReferenceContract.shelfCoverDp.first.dp,
+                height = ReactReferenceContract.shelfCoverDp.second.dp
+            ).clip(RoundedCornerShape(3.dp))
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.story_brain_cover),
+                contentDescription = "${book.title} 封面",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
         }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("读至第 ${book.currentChapterIndex + 1} 章", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                libraryBookStatus(book, ttsCompleted),
+                modifier = Modifier.clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(horizontal = 8.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = .35f))
 }
 
 @Composable
-fun ImportPreviewScreen(viewModel: AppViewModel, onBack: () -> Unit, onImported: (String) -> Unit) {
+fun ImportPreviewScreen(
+    viewModel: AppViewModel,
+    onBack: () -> Unit,
+    onImported: (String) -> Unit
+) {
     val state by viewModel.importState.collectAsStateWithLifecycle()
+    val reselectLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) viewModel.loadNovel(uri)
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -291,8 +326,12 @@ fun ImportPreviewScreen(viewModel: AppViewModel, onBack: () -> Unit, onImported:
             if (state.novel != null) {
                 Surface(shadowElevation = 8.dp) {
                     Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("重新选择") }
-                        Button(onClick = { viewModel.confirmImport(onImported) }, modifier = Modifier.weight(1f)) { Text("确认导入") }
+                        OutlinedButton(
+                            onClick = { reselectLauncher.launch(TXT_MIME_TYPES) },
+                            enabled = !state.loading,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("重新选择") }
+                        Button(onClick = { viewModel.confirmImport(onImported) }, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("确认导入") }
                     }
                 }
             }
@@ -511,6 +550,9 @@ fun BookScreen(
                                 color = if (analysis.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                 style = MaterialTheme.typography.bodySmall
                             )
+                            StoryAnalysisPolicy.failurePrompt(analysis)?.let { prompt ->
+                                Text(prompt, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }
@@ -583,25 +625,25 @@ fun ReaderScreen(
     val chapter by viewModel.chapter(chapterId).collectAsStateWithLifecycle(initialValue = null)
     val chapters by viewModel.chapters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
     val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val chapterMentionCharacters by viewModel.chapterCharacters(chapterId).collectAsStateWithLifecycle(initialValue = emptyList())
     val ttsState by viewModel.ttsState.collectAsStateWithLifecycle()
+    val memoryAction by viewModel.memoryActionState.collectAsStateWithLifecycle()
+    val readerMode by viewModel.readerMode.collectAsStateWithLifecycle()
     var pendingMemory by remember { mutableStateOf<PendingReadingMemory?>(null) }
-    val knownSpeakers = remember(characters) {
-        buildMap {
-            characters.forEach { character ->
-                put(character.canonicalName, character.canonicalName)
-                val aliases = runCatching { JSONArray(character.aliasesJson) }.getOrNull() ?: JSONArray()
-                for (index in 0 until aliases.length()) {
-                    aliases.optString(index).trim().takeIf { it.isNotBlank() }?.let { alias ->
-                        putIfAbsent(alias, character.canonicalName)
-                    }
-                }
-            }
-        }
+    var showMoreSheet by rememberSaveable { mutableStateOf(false) }
+    val requestedIndex = ReaderPagerPolicy.startIndex(chapters, chapterId)
+    val currentIndex = requestedIndex ?: -1
+    val knownSpeakers = remember(chapterMentionCharacters, characters) {
+        ReaderSpeakerPolicy.buildKnownSpeakers(chapterMentionCharacters, characters)
     }
-    val blocks = remember(chapter?.content, knownSpeakers) {
-        chapter?.let { TextToChatParser.parse(it.content, knownSpeakers) }.orEmpty()
+    fun openReaderChapter(targetIndex: Int) {
+        val targetChapter = chapters.getOrNull(targetIndex) ?: return
+        if (targetChapter.id == chapterId) return
+        viewModel.stopChapterTts()
+        viewModel.markReading(bookId, targetChapter.chapterIndex)
+        onOpenChapter(targetChapter.id)
     }
-    val currentIndex = chapters.indexOfFirst { it.id == chapterId }
+
     pendingMemory?.let { memory ->
         MemoryEditorDialog(
             title = "保存为原文记忆",
@@ -614,21 +656,62 @@ fun ReaderScreen(
                     type = MemoryType.EXCERPT,
                     title = title,
                     content = content,
-                    chapterIndex = chapter?.chapterIndex,
+                    chapterIndex = memory.chapterIndex,
                     characterIds = memory.characterId?.let(::listOf).orEmpty()
                 ) { pendingMemory = null }
             }
         )
     }
+    if (showMoreSheet) {
+        ModalBottomSheet(onDismissRequest = { showMoreSheet = false }) {
+            ListItem(
+                headlineContent = { Text("纯文本模式") },
+                supportingContent = { if (readerMode == ReaderMode.PLAIN_TEXT) Text("当前模式") },
+                modifier = Modifier.clickable {
+                    viewModel.setReaderMode(ReaderMode.PLAIN_TEXT)
+                    showMoreSheet = false
+                }
+            )
+            ListItem(
+                headlineContent = { Text("对话模式") },
+                supportingContent = { if (readerMode == ReaderMode.DIALOGUE) Text("当前模式") },
+                modifier = Modifier.clickable {
+                    viewModel.setReaderMode(ReaderMode.DIALOGUE)
+                    showMoreSheet = false
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text(ReactReferenceContract.readerSheetActions[0]) },
+                leadingContent = { Icon(Icons.Rounded.GraphicEq, null) },
+                modifier = Modifier.clickable {
+                    val current = chapter ?: return@clickable
+                    showMoreSheet = false
+                    viewModel.generateChapterTts(bookId, current.id)
+                }
+            )
+            ListItem(
+                headlineContent = { Text(ReactReferenceContract.readerSheetActions[1]) },
+                supportingContent = { Text("保存前可确认标题与正文，避免误触重复保存") },
+                leadingContent = { Icon(Icons.Rounded.Bookmarks, null) },
+                modifier = Modifier.clickable {
+                    val current = chapter ?: return@clickable
+                    showMoreSheet = false
+                    pendingMemory = PendingReadingMemory(
+                        title = current.title,
+                        content = current.content,
+                        chapterIndex = current.chapterIndex
+                    )
+                }
+            )
+            Spacer(Modifier.height(20.dp))
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Column {
-                        Text(chapter?.title ?: "正在读取", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("聊天式阅读", style = MaterialTheme.typography.labelSmall)
-                    }
-                },
+                modifier = Modifier.height(ReactReferenceContract.topBarHeightDp.dp),
+                title = { Text(chapter?.title ?: "正在读取", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } },
                 actions = {
                     if (!chapter?.ttsManifestPath.isNullOrBlank()) {
@@ -646,82 +729,133 @@ fun ReaderScreen(
                             )
                         }
                     }
-                    IconButton(
-                        enabled = !ttsState.running,
-                        onClick = { chapter?.let { viewModel.generateChapterTts(bookId, it.id) } }
-                    ) {
-                        Icon(Icons.Rounded.GraphicEq, if (chapter?.ttsManifestPath == null) "生成本章配音" else "重新生成本章配音")
-                    }
+                    IconButton(onClick = { showMoreSheet = true }) { Icon(Icons.Rounded.MoreVert, "更多") }
                 }
             )
         },
         bottomBar = {
             Surface(shadowElevation = 6.dp) {
                 Row(
-                    Modifier.fillMaxWidth().padding(8.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
+                    TextButton(
                         enabled = currentIndex > 0,
-                        onClick = {
-                            chapters.getOrNull(currentIndex - 1)?.let {
-                                if (ttsState.playing) viewModel.stopChapterTts()
-                                viewModel.markReading(bookId, it.chapterIndex)
-                                onOpenChapter(it.id)
-                            }
-                        }
-                    ) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "上一章") }
-                    chapter?.let { Text("第 ${it.chapterIndex + 1} 章 · ${ttsLabel(it.ttsStatus)}", style = MaterialTheme.typography.labelMedium) }
-                    IconButton(
+                        onClick = { openReaderChapter(currentIndex - 1) }
+                    ) { Text(ReactReferenceContract.readerBottomActions[0]) }
+                    Text(
+                        "${ReactReferenceContract.readerBottomActions[1]}\n${(currentIndex + 1).coerceAtLeast(0)}/${chapters.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    TextButton(
                         enabled = currentIndex >= 0 && currentIndex < chapters.lastIndex,
-                        onClick = {
-                            chapters.getOrNull(currentIndex + 1)?.let {
-                                if (ttsState.playing) viewModel.stopChapterTts()
-                                viewModel.markReading(bookId, it.chapterIndex)
-                                onOpenChapter(it.id)
-                            }
-                        }
-                    ) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "下一章") }
+                        onClick = { openReaderChapter(currentIndex + 1) }
+                    ) { Text(ReactReferenceContract.readerBottomActions[2]) }
                 }
             }
         }
     ) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(14.dp, 16.dp, 14.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (ttsState.chapterId == chapterId && (ttsState.progress != null || ttsState.message != null)) {
-                item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                        Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                            Text(
-                                ttsState.progress ?: ttsState.message.orEmpty(),
-                                color = if (ttsState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+        if (requestedIndex == null) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else key(chapterId, chapters.size) {
+            val pagerState = rememberPagerState(
+                initialPage = requestedIndex,
+                pageCount = { chapters.size }
+            )
+            LaunchedEffect(pagerState, requestedIndex, chapters) {
+                snapshotFlow { pagerState.settledPage }.collect { targetIndex ->
+                    if (targetIndex != requestedIndex) openReaderChapter(targetIndex)
+                }
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize().padding(padding),
+                userScrollEnabled = chapters.size > 1
+            ) { page ->
+                val currentChapter = chapters.getOrNull(page)
+            val paragraphs = remember(currentChapter?.content) {
+                currentChapter?.let { ReaderParagraphs.split(it.content) }.orEmpty()
+            }
+            val blocks = remember(currentChapter?.content, knownSpeakers) {
+                currentChapter?.let { TextToChatParser.parse(currentChapter.content, knownSpeakers) }.orEmpty()
+            }
+            LazyColumn(
+                Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    horizontal = 22.dp,
+                    vertical = (18 + ReactReferenceContract.readerBottomContentPaddingDp + ReactReferenceContract.bottomNavigationHeightDp).dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                if (ttsState.chapterId == currentChapter?.id && (ttsState.progress != null || ttsState.message != null)) {
+                    item {
+                        Text(
+                            ttsState.progress ?: ttsState.message.orEmpty(),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            color = if (ttsState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (ttsState.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(bottom = 10.dp))
+                    }
+                }
+                if (memoryAction.message != null) {
+                    item {
+                        Text(
+                            memoryAction.message.orEmpty(),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            color = if (memoryAction.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+                if (readerMode == ReaderMode.PLAIN_TEXT) {
+                    items(paragraphs) { paragraph ->
+                        Text(
+                            text = paragraph,
+                            modifier = Modifier.fillMaxWidth().combinedClickable(
+                                onClick = {},
+                                onLongClick = {
+                                    pendingMemory = PendingReadingMemory(
+                                        title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章摘录",
+                                        content = paragraph,
+                                        chapterIndex = currentChapter?.chapterIndex
+                                    )
+                                }
+                            ).padding(vertical = 7.dp),
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontFamily = ReactReferenceContract.readerFontFamily,
+                                lineHeight = ReactReferenceContract.readerLineHeightSp.sp
                             )
-                            if (ttsState.running) {
-                                Spacer(Modifier.height(6.dp))
-                                LinearProgressIndicator(Modifier.fillMaxWidth())
+                        )
+                    }
+                } else {
+                    items(blocks) { block ->
+                        when (block) {
+                            is ReadingBlock.Dialogue -> DialogueBubble(block) {
+                                pendingMemory = PendingReadingMemory(
+                                    title = "${block.speaker}的原文对白",
+                                    content = block.text,
+                                    characterId = chapterMentionCharacters.firstOrNull { it.canonicalName == block.speaker }?.id
+                                        ?: characters.firstOrNull { it.canonicalName == block.speaker }?.id,
+                                    chapterIndex = currentChapter?.chapterIndex
+                                )
+                            }
+                            is ReadingBlock.Narration -> NarrationCard(block.text) {
+                                pendingMemory = PendingReadingMemory(
+                                    title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章旁白",
+                                    content = block.text,
+                                    chapterIndex = currentChapter?.chapterIndex
+                                )
                             }
                         }
                     }
                 }
             }
-            items(blocks) { block ->
-                when (block) {
-                    is ReadingBlock.Dialogue -> DialogueBubble(block) {
-                        pendingMemory = PendingReadingMemory(
-                            title = "${block.speaker}的原文对白",
-                            content = block.text,
-                            characterId = characters.firstOrNull { it.canonicalName == block.speaker }?.id
-                        )
-                    }
-                    is ReadingBlock.Narration -> NarrationCard(block.text) {
-                        pendingMemory = PendingReadingMemory("第${(chapter?.chapterIndex ?: 0) + 1}章旁白", block.text)
-                    }
-                }
-            }
+        }
         }
     }
 }
@@ -730,9 +864,9 @@ fun ReaderScreen(
 private fun DialogueBubble(block: ReadingBlock.Dialogue, onLongClick: () -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Box(
-            Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondaryContainer),
+            Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
-        ) { Text(block.speaker.take(1), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary) }
+        ) { Text(block.speaker.take(1), fontWeight = FontWeight.Bold) }
         Spacer(Modifier.width(9.dp))
         Column(Modifier.widthIn(max = 310.dp)) {
             Text(block.speaker, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -761,7 +895,7 @@ private fun NarrationCard(text: String, onLongClick: () -> Unit) {
     }
 }
 
-private data class PendingReadingMemory(val title: String, val content: String, val characterId: String? = null)
+private data class PendingReadingMemory(val title: String, val content: String, val characterId: String? = null, val chapterIndex: Int? = null)
 
 @Composable
 fun StoryBrainScreen(
@@ -769,7 +903,10 @@ fun StoryBrainScreen(
     viewModel: AppViewModel,
     onBack: () -> Unit,
     onOpenMemory: () -> Unit,
-    onChatCharacter: (String) -> Unit
+    onChatCharacter: (String) -> Unit,
+    initialTab: Int = 0,
+    lockedTab: Boolean = false,
+    hideTopBar: Boolean = false
 ) {
     val characters by viewModel.characters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
     val relations by viewModel.relations(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
@@ -783,55 +920,66 @@ fun StoryBrainScreen(
     val fishVoices by viewModel.ttsVoicePool(TtsProfileIds.FISH).collectAsStateWithLifecycle(initialValue = emptyList())
     val compatibleVoices by viewModel.ttsVoicePool(TtsProfileIds.OPENAI).collectAsStateWithLifecycle(initialValue = emptyList())
     val exportState by viewModel.exportState.collectAsStateWithLifecycle()
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var pendingExport by remember { mutableStateOf<String?>(null) }
+    var selectedTab by remember(initialTab) { mutableIntStateOf(initialTab) }
+    var pendingExport by remember { mutableStateOf<Pair<Long, String>?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        val content = pendingExport
-        if (uri != null && content != null) viewModel.writeNeo4jExport(uri, content)
+        val pending = pendingExport
+        if (uri != null && pending != null) viewModel.writeNeo4jExport(bookId, pending.first, uri, pending.second)
+        else pending?.let { viewModel.cancelNeo4jExport(bookId, it.first) }
         pendingExport = null
     }
     val tabs = listOf("剧情链", "角色图", "地图")
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (!hideTopBar) TopAppBar(
                 title = { Text("章境") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } },
                 actions = {
-                    IconButton(onClick = onOpenMemory) { Icon(Icons.Rounded.Bookmarks, "打开记忆库") }
-                    IconButton(
-                        enabled = !exportState.running,
-                        onClick = {
-                            viewModel.prepareNeo4jExport(bookId) { content ->
-                                pendingExport = content
-                                exportLauncher.launch("story-brain-$bookId.cypher")
+                    if (!lockedTab) {
+                        IconButton(onClick = onOpenMemory) { Icon(Icons.Rounded.Bookmarks, "打开记忆库") }
+                    }
+                    if (!lockedTab || initialTab == 0) {
+                        IconButton(
+                            enabled = !exportState.running,
+                            onClick = {
+                                viewModel.prepareNeo4jExport(bookId) { requestId, content ->
+                                    pendingExport = requestId to content
+                                    exportLauncher.launch("story-brain-$bookId.cypher")
+                                }
                             }
-                        }
-                    ) { Icon(Icons.Rounded.FileDownload, "导出 Neo4j Cypher") }
+                        ) { Icon(Icons.Rounded.FileDownload, "导出 Neo4j Cypher") }
+                    }
                 }
             )
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                MetricCard("角色", characters.size.toString(), Icons.Rounded.Groups, Modifier.weight(1f))
-                MetricCard("关系", relations.size.toString(), Icons.Rounded.AccountTree, Modifier.weight(1f))
-                MetricCard("事件", nodes.size.toString(), Icons.Rounded.Schedule, Modifier.weight(1f))
+            if (!lockedTab) {
+                Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    MetricCard("角色", characters.size.toString(), Icons.Rounded.Groups, Modifier.weight(1f))
+                    MetricCard("关系", relations.size.toString(), Icons.Rounded.AccountTree, Modifier.weight(1f))
+                    MetricCard("事件", nodes.size.toString(), Icons.Rounded.Schedule, Modifier.weight(1f))
+                }
+                OutlinedButton(onClick = onOpenMemory, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                    Icon(Icons.Rounded.Bookmarks, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("记忆库 · $memoryCount 条")
+                }
             }
-            OutlinedButton(onClick = onOpenMemory, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-                Icon(Icons.Rounded.Bookmarks, null)
-                Spacer(Modifier.width(8.dp))
-                Text("记忆库 · $memoryCount 条")
+            if (!lockedTab) {
+                exportState.message?.let { message ->
+                    Text(
+                        message,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = if (exportState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
-            exportState.message?.let { message ->
-                Text(
-                    message,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    color = if (exportState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            TabRow(selectedTabIndex = selectedTab) {
-                tabs.forEachIndexed { index, title -> Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(title) }) }
+            if (!lockedTab) {
+                TabRow(selectedTabIndex = selectedTab) {
+                    tabs.forEachIndexed { index, title -> Tab(selected = selectedTab == index, onClick = { selectedTab = index }, text = { Text(title) }) }
+                }
             }
             val icon = when (selectedTab) {
                 0 -> Icons.Rounded.AccountTree
@@ -874,6 +1022,9 @@ fun StoryBrainScreen(
                         }
                         1 -> items(characters, key = { it.id }) { character ->
                             val relatedCount = relations.count { it.fromCharacterId == character.id || it.toCharacterId == character.id }
+                            val participatedPlotCount = nodes.count {
+                                character.id in runCatching { JSONArray(it.participantIdsJson) }.getOrNull().stringValues()
+                            }
                             var voiceMenuOpen by remember(character.id) { mutableStateOf(false) }
                             val allVoices = edgeVoices + fishVoices + compatibleVoices
                             val sortedVoices = remember(character, allVoices) {
@@ -882,8 +1033,7 @@ fun StoryBrainScreen(
                             val binding = activeBindings.firstOrNull { it.characterId == character.id }
                             val primaryId = bookTts?.primaryProfileId ?: ttsConfig.globalProfileId
                             val primaryName = ttsProfiles.firstOrNull { it.id == primaryId }?.displayName ?: "Edge TTS"
-                            val localImportance = (relatedCount * 0.08f + nodes.count { character.id in runCatching { JSONArray(it.participantIdsJson) }.getOrNull().stringValues() } * 0.12f).coerceAtMost(1f)
-                            val importance = maxOf(character.importanceScore, localImportance)
+                            val importance = character.importanceScore.coerceIn(0f, 1f)
                             Card(
                                 onClick = { onChatCharacter(character.id) },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -896,7 +1046,16 @@ fun StoryBrainScreen(
                                     Spacer(Modifier.width(12.dp))
                                     Column(Modifier.weight(1f)) {
                                         Text(character.canonicalName, fontWeight = FontWeight.Bold)
-                                        Text("${character.personality.ifBlank { "性格待完善" }} · $relatedCount 条关系", style = MaterialTheme.typography.bodySmall)
+                                        Text(
+                                            "重要度 ${StoryGraphMetrics.importancePercent(character.importanceScore)} · $relatedCount 条关系 · $participatedPlotCount 个剧情",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                        if (character.importanceReason.isNotBlank()) {
+                                            Text(character.importanceReason, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        if (character.personality.isNotBlank()) {
+                                            Text(character.personality, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
                                         if (importance >= .65f && primaryId != TtsProfileIds.FISH) {
                                             Text("重点角色 · 建议使用 Fish", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
                                         }
@@ -906,7 +1065,7 @@ fun StoryBrainScreen(
                                         Box {
                                             OutlinedButton(
                                                 onClick = { voiceMenuOpen = true },
-                                                enabled = sortedVoices.isNotEmpty(),
+                                                enabled = VoiceBindingMenuPolicy.enabled(binding != null, sortedVoices.size),
                                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp)
                                             ) {
                                                 Icon(Icons.Rounded.GraphicEq, null, Modifier.size(16.dp))
@@ -1034,7 +1193,7 @@ private fun SimpleStoryGraph(graph: GraphData) {
     val primary = MaterialTheme.colorScheme.primary
     val surface = MaterialTheme.colorScheme.surface
     val onSurface = MaterialTheme.colorScheme.onSurface
-    val protect = Color(0xFF2E7D32)
+    val protect = Color.Gray
     Canvas(Modifier.fillMaxWidth().height(330.dp)) {
         if (graph.nodes.isEmpty()) return@Canvas
         val center = Offset(size.width / 2f, size.height / 2f)
@@ -1153,7 +1312,7 @@ fun CharacterChatScreen(
             title = { Text("重命名对话") },
             text = { OutlinedTextField(title, { title = it.take(40) }, label = { Text("会话标题") }, singleLine = true) },
             dismissButton = { TextButton(onClick = { renameSession = false }) { Text("取消") } },
-            confirmButton = { Button(onClick = { viewModel.renameChatSession(currentSessionId, title); renameSession = false }) { Text("保存") } }
+            confirmButton = { Button(onClick = { viewModel.renameChatSession(currentSessionId, characterId, title); renameSession = false }) { Text("保存") } }
         )
     }
     if (confirmDeleteSession) {
@@ -1178,7 +1337,7 @@ fun CharacterChatScreen(
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } },
             confirmButton = {
                 TextButton(onClick = {
-                    viewModel.clearCharacterChat(currentSessionId)
+                    viewModel.clearCharacterChat(currentSessionId, characterId)
                     confirmClear = false
                 }) { Text("确认清空", color = MaterialTheme.colorScheme.error) }
             }

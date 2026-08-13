@@ -1,5 +1,6 @@
 package com.storybrain.app.tts
 
+import com.storybrain.app.settings.ApiEndpointPolicy
 import java.io.File
 import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,8 +19,10 @@ class OpenAiTtsClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) {
-    private val baseUrl = baseUrl.trim().trimEnd('/').also {
-        require(allowInsecureForTests || it.startsWith("https://", true)) { "兼容 TTS URL 必须使用 HTTPS" }
+    private val baseUrl = if (allowInsecureForTests) {
+        baseUrl.trim().trimEnd('/')
+    } else {
+        ApiEndpointPolicy.normalize(baseUrl)
     }
 
     fun listModels(apiKey: String): List<String> {

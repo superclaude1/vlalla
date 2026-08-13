@@ -1,5 +1,6 @@
 package com.storybrain.app.tts
 
+import com.storybrain.app.settings.ApiEndpointPolicy
 import java.io.File
 import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -21,8 +22,10 @@ class FishAudioClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) {
-    private val baseUrl = baseUrl.trim().trimEnd('/').also {
-        require(allowInsecureForTests || it.startsWith("https://", true)) { "Fish Audio URL 必须使用 HTTPS" }
+    private val baseUrl = if (allowInsecureForTests) {
+        baseUrl.trim().trimEnd('/')
+    } else {
+        ApiEndpointPolicy.normalize(baseUrl)
     }
 
     fun listModels(): List<String> = listOf("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1")

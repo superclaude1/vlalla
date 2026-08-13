@@ -124,6 +124,7 @@ import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.reader.ReaderParagraphs
 import com.storybrain.app.reader.ReaderPagerPolicy
+import com.storybrain.app.reader.ReaderPreferences
 import com.storybrain.app.reader.ReadingBlock
 import com.storybrain.app.reader.TextToChatParser
 import org.json.JSONArray
@@ -629,6 +630,7 @@ fun ReaderScreen(
     val ttsState by viewModel.ttsState.collectAsStateWithLifecycle()
     val memoryAction by viewModel.memoryActionState.collectAsStateWithLifecycle()
     val readerMode by viewModel.readerMode.collectAsStateWithLifecycle()
+    val readerPreferences by viewModel.readerPreferences.collectAsStateWithLifecycle()
     var pendingMemory by remember { mutableStateOf<PendingReadingMemory?>(null) }
     var showMoreSheet by rememberSaveable { mutableStateOf(false) }
     val requestedIndex = ReaderPagerPolicy.startIndex(chapters, chapterId)
@@ -678,6 +680,23 @@ fun ReaderScreen(
                 modifier = Modifier.clickable {
                     viewModel.setReaderMode(ReaderMode.DIALOGUE)
                     showMoreSheet = false
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("字号") },
+                supportingContent = { Text("${readerPreferences.fontSizeSp} sp") },
+                leadingContent = {
+                    TextButton(
+                        enabled = readerPreferences.fontSizeSp > ReaderPreferences.MIN_FONT_SIZE_SP,
+                        onClick = { viewModel.adjustReaderFontSize(-1) }
+                    ) { Text("A−") }
+                },
+                trailingContent = {
+                    TextButton(
+                        enabled = readerPreferences.fontSizeSp < ReaderPreferences.MAX_FONT_SIZE_SP,
+                        onClick = { viewModel.adjustReaderFontSize(1) }
+                    ) { Text("A+") }
                 }
             )
             HorizontalDivider()
@@ -786,7 +805,7 @@ fun ReaderScreen(
             LazyColumn(
                 Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
-                    horizontal = 22.dp,
+                    horizontal = readerPreferences.horizontalPaddingDp.dp,
                     vertical = (18 + ReactReferenceContract.readerBottomContentPaddingDp + ReactReferenceContract.bottomNavigationHeightDp).dp
                 ),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -828,14 +847,19 @@ fun ReaderScreen(
                             ).padding(vertical = 7.dp),
                             style = MaterialTheme.typography.bodyLarge.copy(
                                 fontFamily = ReactReferenceContract.readerFontFamily,
-                                lineHeight = ReactReferenceContract.readerLineHeightSp.sp
+                                fontSize = readerPreferences.fontSizeSp.sp,
+                                lineHeight = readerPreferences.lineHeightSp.sp
                             )
                         )
                     }
                 } else {
                     items(blocks) { block ->
                         when (block) {
-                            is ReadingBlock.Dialogue -> DialogueBubble(block) {
+                            is ReadingBlock.Dialogue -> DialogueBubble(
+                                block = block,
+                                fontSizeSp = readerPreferences.fontSizeSp,
+                                lineHeightSp = readerPreferences.lineHeightSp
+                            ) {
                                 pendingMemory = PendingReadingMemory(
                                     title = "${block.speaker}的原文对白",
                                     content = block.text,
@@ -844,7 +868,11 @@ fun ReaderScreen(
                                     chapterIndex = currentChapter?.chapterIndex
                                 )
                             }
-                            is ReadingBlock.Narration -> NarrationCard(block.text) {
+                            is ReadingBlock.Narration -> NarrationCard(
+                                text = block.text,
+                                fontSizeSp = readerPreferences.fontSizeSp,
+                                lineHeightSp = readerPreferences.lineHeightSp
+                            ) {
                                 pendingMemory = PendingReadingMemory(
                                     title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章旁白",
                                     content = block.text,
@@ -861,7 +889,12 @@ fun ReaderScreen(
 }
 
 @Composable
-private fun DialogueBubble(block: ReadingBlock.Dialogue, onLongClick: () -> Unit) {
+private fun DialogueBubble(
+    block: ReadingBlock.Dialogue,
+    fontSizeSp: Int,
+    lineHeightSp: Int,
+    onLongClick: () -> Unit
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Box(
             Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
@@ -876,21 +909,40 @@ private fun DialogueBubble(block: ReadingBlock.Dialogue, onLongClick: () -> Unit
                 shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
                 color = MaterialTheme.colorScheme.surface
             ) {
-                Text(block.text, Modifier.padding(12.dp), style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    block.text,
+                    Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        fontSize = fontSizeSp.sp,
+                        lineHeight = lineHeightSp.sp
+                    )
+                )
             }
         }
     }
 }
 
 @Composable
-private fun NarrationCard(text: String, onLongClick: () -> Unit) {
+private fun NarrationCard(
+    text: String,
+    fontSizeSp: Int,
+    lineHeightSp: Int,
+    onLongClick: () -> Unit
+) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Surface(
             modifier = Modifier.widthIn(max = 340.dp).combinedClickable(onClick = {}, onLongClick = onLongClick),
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .58f)
         ) {
-            Text(text, Modifier.padding(horizontal = 14.dp, vertical = 9.dp), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text,
+                Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = fontSizeSp.sp,
+                    lineHeight = lineHeightSp.sp
+                )
+            )
         }
     }
 }

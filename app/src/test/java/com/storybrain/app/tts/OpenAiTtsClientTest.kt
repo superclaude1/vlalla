@@ -6,6 +6,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -74,6 +75,20 @@ class OpenAiTtsClientTest {
         assertEquals("mp3", body.getString("response_format"))
         assertEquals(0.99, body.getDouble("speed"), 0.001)
         assertEquals("情绪：calm；语气：soft tone；语速1.10倍", body.getString("instructions"))
+    }
+
+    @Test
+    fun rejectsUnsafeProductionEndpoints() {
+        listOf(
+            "https://user:password@example.com/v1",
+            "https://example.com/v1?api_key=secret",
+            "https://example.com/v1#token",
+            "http://example.com/v1"
+        ).forEach { endpoint ->
+            assertThrows(IllegalArgumentException::class.java) {
+                OpenAiTtsClient(endpoint)
+            }
+        }
     }
 
     @Test

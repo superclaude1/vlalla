@@ -2,9 +2,10 @@ package com.storybrain.app.tts
 
 import com.storybrain.app.reader.ReadingBlock
 import com.storybrain.app.settings.LlmMessage
+import com.storybrain.app.settings.LlmProfileSnapshot
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.OpenAiCompatibleClient
-import kotlinx.coroutines.flow.first
+
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -15,19 +16,27 @@ data class DirectedBlock(
 )
 
 class TtsDirectingService(
-    private val settings: LlmSettingsStore,
+    private val settings: LlmSettingsStore?,
     private val client: OpenAiCompatibleClient = OpenAiCompatibleClient()
 ) {
     suspend fun direct(blocks: List<ReadingBlock>, onProgress: (Int, Int) -> Unit = { _, _ -> }): List<DirectedBlock> {
+        val profile = requireNotNull(settings) { "必须由调用方提供 LLM 快照" }.snapshot()
+        return direct(blocks, profile, onProgress)
+    }
+
+    suspend fun direct(
+        blocks: List<ReadingBlock>,
+        profile: LlmProfileSnapshot,
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): List<DirectedBlock> {
         if (blocks.isEmpty()) return emptyList()
-        val config = settings.config.first()
-        if (config.model.isBlank() || settings.readApiKey().isBlank()) return localAll(blocks)
+        if (profile.modelId.isBlank() || profile.apiKey.isBlank()) return localAll(blocks)
         val output = mutableListOf<DirectedBlock>()
         val batches = blocks.indices.chunked(BATCH_SIZE)
         batches.forEachIndexed { batchIndex, indices ->
             val byId = indices.associate { it.toString() to blocks[it] }
-            val parsed = runCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId) }
-                .recoverCatching { requestBatch(config.baseUrl, settings.readApiKey(), config.model, byId, repair = true) }
+            val parsed = runCatching { requestBatch(profile.baseUrl, profile.apiKey, profile.modelId, byId) }
+                .recoverCatching { requestBatch(profile.baseUrl, profile.apiKey, profile.modelId, byId, repair = true) }
                 .getOrNull()
             indices.forEach { index ->
                 output += DirectedBlock(
@@ -41,7 +50,7 @@ class TtsDirectingService(
         return output.sortedBy { it.segmentId.toIntOrNull() ?: Int.MAX_VALUE }
     }
 
-    private fun requestBatch(
+    private suspend fun requestBatch(
         baseUrl: String,
         apiKey: String,
         model: String,

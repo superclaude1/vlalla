@@ -6,13 +6,24 @@ import com.storybrain.app.data.StoryCharacterEntity
 import com.storybrain.app.data.StoryRelationEntity
 import com.storybrain.app.data.StoryRepository
 import com.storybrain.app.data.TaskStatus
+import com.storybrain.app.data.TaskRunType
+import com.storybrain.app.data.TaskRunStatus
 import com.storybrain.app.settings.LlmMessage
-import com.storybrain.app.settings.LlmConnectionException
+import com.storybrain.app.settings.LlmDomainException
+import com.storybrain.app.settings.NetworkFailureClassifier
 import com.storybrain.app.settings.LlmSettingsStore
+import com.storybrain.app.settings.LlmProfileSnapshot
 import com.storybrain.app.settings.OpenAiCompatibleClient
+import com.storybrain.app.settings.ChatCompletionUsage
+import com.storybrain.app.settings.UsageQuality
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import kotlinx.coroutines.flow.first
+
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -21,10 +32,22 @@ class LlmStoryAnalyzer(
     private val settings: LlmSettingsStore,
     private val client: OpenAiCompatibleClient = OpenAiCompatibleClient()
 ) {
-    suspend fun analyzeNext(bookId: String, requestedChapterCount: Int? = null): AnalysisRunResult {
-        val config = settings.config.first()
-        val apiKey = settings.readApiKey()
-        require(config.model.isNotBlank()) { "请先在设置中检测并选择分析模型" }
+    suspend fun analyzeNext(
+        bookId: String,
+        requestedChapterCount: Int? = null,
+        onProgress: (AnalysisProgress) -> Unit = {}
+    ): AnalysisRunResult {
+        val profile = settings.snapshot()
+        return analyzeNextWithProfile(profile, bookId, requestedChapterCount, onProgress)
+    }
+
+    private suspend fun analyzeNextWithProfile(
+        profile: LlmProfileSnapshot,
+        bookId: String,
+        requestedChapterCount: Int? = null,
+        onProgress: (AnalysisProgress) -> Unit = {}
+    ): AnalysisRunResult {
+        require(profile.modelId.isNotBlank()) { "请先在设置中检测并选择分析模型" }
 
         val book = repository.getBook(bookId) ?: error("找不到这本小说")
         val allChapters = repository.getChapters(bookId)
@@ -37,11 +60,15 @@ class LlmStoryAnalyzer(
         val target = allChapters.drop(book.analysisCompleted).take(targetCount)
         if (target.isEmpty()) return AnalysisRunResult(0, book.analysisCompleted, "全书已经分析完成")
 
+        val runId = repository.startTaskRun(TaskRunType.ANALYSIS, bookId)
         var runningBatchIds = emptyList<String>()
         return runCatching {
             var completed = book.analysisCompleted
             var calls = 0
-            groupByCharacterBudget(target, 24_000).forEach { batch ->
+            var usage = AnalysisUsage()
+            val batches = groupByCharacterBudget(target, 24_000)
+            batches.forEachIndexed { batchIndex, batch ->
+                currentCoroutineContext().ensureActive()
                 runningBatchIds = batch.map { it.id }
                 repository.updateAnalysisStatus(runningBatchIds, TaskStatus.RUNNING)
                 val knownCharacters = repository.getCharacters(bookId)
@@ -51,27 +78,68 @@ class LlmStoryAnalyzer(
                     LlmMessage("user", buildUserPrompt(batch, knownCharacters, knownNodes))
                 )
                 val response = try {
-                    client.chatCompletion(config.baseUrl, apiKey, config.model, messages, temperature = 0.1, jsonMode = true)
-                } catch (error: LlmConnectionException) {
-                    val unsupportedJsonMode = error.statusCode == 400 &&
-                        error.message.orEmpty().contains(Regex("response[_ -]?format|json", RegexOption.IGNORE_CASE))
+                    client.chatCompletionResult(profile.baseUrl, profile.apiKey, profile.modelId, messages, temperature = 0.1, jsonMode = true)
+                } catch (error: LlmDomainException) {
+                    val unsupportedJsonMode = error.failure.statusCode == 400
                     if (!unsupportedJsonMode) throw error
-                    client.chatCompletion(config.baseUrl, apiKey, config.model, messages, temperature = 0.1, jsonMode = false)
+                    client.chatCompletionResult(profile.baseUrl, profile.apiKey, profile.modelId, messages, temperature = 0.1, jsonMode = false)
                 }
-                val delta = parseDelta(bookId, response, knownCharacters, knownNodes)
+                usage += AnalysisUsage(response.usage)
+                withContext(NonCancellable) {
+                    repository.recordTaskUsage(runId, TaskRunType.ANALYSIS, bookId, batchIndex + 1, response.usage, response.requestId, response.responseModel)
+                }
+                val delta = parseDelta(bookId, response.content, knownCharacters, knownNodes, batch)
                 completed = maxOf(completed, batch.maxOf { it.chapterIndex } + 1)
-                repository.saveAnalysisDelta(bookId, completed, delta.characters, delta.relations, delta.nodes)
-                repository.updateAnalysisStatus(batch.map { it.id }, TaskStatus.COMPLETED)
+                repository.saveAnalysisDelta(bookId, completed, batch.map { it.id }, delta.characters, delta.relations, delta.nodes, delta.mentions)
                 runningBatchIds = emptyList()
                 calls++
+                onProgress(AnalysisProgress(completed, usage))
             }
-            AnalysisRunResult(target.size, completed, "已完成 ${target.size} 章 LLM 分析（$calls 次请求）")
+            repository.finishTaskRun(runId, TaskRunStatus.COMPLETED)
+            AnalysisRunResult(target.size, completed, "已完成 ${target.size} 章 LLM 分析（$calls 次请求）", usage)
         }.getOrElse { error ->
-            if (runningBatchIds.isNotEmpty()) {
-                repository.updateAnalysisStatus(runningBatchIds, TaskStatus.FAILED)
+            if (error is CancellationException) {
+                if (runningBatchIds.isNotEmpty()) {
+                    withContext(NonCancellable) {
+                        repository.updateRunningAnalysisStatus(runningBatchIds, TaskStatus.CANCELLED)
+                    }
+                }
+                withContext(NonCancellable) {
+                    repository.finishTaskRun(runId, TaskRunStatus.CANCELLED)
+                }
+                throw error
             }
-            throw error
+            if (runningBatchIds.isNotEmpty()) {
+                withContext(NonCancellable) {
+                    repository.updateRunningAnalysisStatus(runningBatchIds, TaskStatus.FAILED)
+                }
+            }
+            val failure = (error as? LlmDomainException)?.failure
+                ?: NetworkFailureClassifier.classifyMalformedJson(
+                    requestId = null,
+                    payloadBytes = 0
+                )
+            val batchIndex = target.let { chapters ->
+                groupByCharacterBudget(chapters, 24_000).indexOfFirst { batch -> batch.any { it.id in runningBatchIds } }
+            }.takeIf { it >= 0 }?.plus(1) ?: 1
+            withContext(NonCancellable) {
+                repository.recordTaskFailure(
+                    runId, TaskRunType.ANALYSIS, bookId, "ERROR", failure.stage.name,
+                    failure.retryable, failure.statusCode, failure.attempt, failure.message
+                )
+            }
+            throw AnalysisFailureException(
+                failure = failure,
+                failedBatch = batchIndex,
+                totalBatches = groupByCharacterBudget(target, 24_000).size,
+                cause = error
+            )
         }
+    }
+
+    suspend fun analyzeAll(bookId: String, onProgress: (AnalysisProgress) -> Unit = {}): AnalysisRunResult {
+        val profile = settings.snapshot()
+        return analyzeNextWithProfile(profile, bookId, Int.MAX_VALUE, onProgress)
     }
 
     private fun buildUserPrompt(
@@ -97,7 +165,8 @@ class LlmStoryAnalyzer(
         bookId: String,
         raw: String,
         existingCharacters: List<StoryCharacterEntity>,
-        existingNodes: List<PlotNodeEntity>
+        existingNodes: List<PlotNodeEntity>,
+        chapters: List<ChapterEntity>
     ): AnalysisDelta {
         val jsonText = extractJsonObject(raw)
         val root = JSONObject(jsonText)
@@ -180,7 +249,15 @@ class LlmStoryAnalyzer(
                 confidence = item.optDouble("confidence", 0.5).toFloat().coerceIn(0f, 1f)
             )
         }
-        return AnalysisDelta(characters, relations, nodes)
+        val mentions = ChapterCharacterMentionParser.parse(
+            bookId = bookId,
+            raw = raw,
+            characters = existingCharacters + characters,
+            chapters = chapters,
+            sourceHashByChapterIndex = chapters.associate { it.chapterIndex to sourceHash(it.content) },
+            analysisVersion = ANALYSIS_VERSION
+        )
+        return AnalysisDelta(characters, relations, nodes, mentions)
     }
 
     private fun groupByCharacterBudget(chapters: List<ChapterEntity>, budget: Int): List<List<ChapterEntity>> {
@@ -216,22 +293,79 @@ class LlmStoryAnalyzer(
     private data class AnalysisDelta(
         val characters: List<StoryCharacterEntity>,
         val relations: List<StoryRelationEntity>,
-        val nodes: List<PlotNodeEntity>
+        val nodes: List<PlotNodeEntity>,
+        val mentions: List<com.storybrain.app.data.ChapterCharacterMentionEntity>
     )
 
     companion object {
+        private const val ANALYSIS_VERSION = 1
         private val SYSTEM_PROMPT = """
             你是“章境”小说知识图谱分析器。只依据提供的原文，不补写、不剧透。
             统一角色真名与别名；关系必须有方向、章节范围、原文证据和置信度。
             剧情允许分支与汇合。gender 只允许 MALE、FEMALE、UNKNOWN。
             仅输出一个合法 JSON 对象，不要 Markdown，不要解释。结构必须为：
             {
-              "characters":[{"name":"标准名","aliases":["别名"],"gender":"UNKNOWN","personality":"简述","firstChapterIndex":0,"lastChapterIndex":0,"confidence":0.8,"importanceScore":0.8,"importanceReason":"主线参与度与叙事作用"}],
+              "characters":[{"name":"标准名","aliases":["别名"],"gender":"UNKNOWN","personality":"简述","firstChapterIndex":0,"lastChapterIndex":0,"confidence":0.8,"importanceScore":0.8,"importanceReason":"主线参与度与叙事作用","chapterMentions":[{"chapterIndex":0,"evidence":"原文短证据","confidence":0.8}]}],
               "relations":[{"from":"标准名","to":"标准名","type":"PROTECTS|FRIEND|ENEMY|FAMILY|MENTOR|LOVES|ALLY|USES|BETRAYS|RELATED_TO","strength":0.8,"startChapterIndex":0,"endChapterIndex":null,"evidence":"原文短证据","confidence":0.8}],
               "plotNodes":[{"title":"事件名","summary":"摘要","startChapterIndex":0,"endChapterIndex":null,"parentTitles":[],"participants":["角色标准名"],"location":"地点或空字符串","confidence":0.8}]
             }
         """.trimIndent()
     }
+
+    private fun sourceHash(content: String): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(content.toByteArray(StandardCharsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
 }
 
-data class AnalysisRunResult(val chapterCount: Int, val completed: Int, val message: String)
+data class AnalysisUsage(
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val totalTokens: Int? = null,
+    val quality: UsageQuality = UsageQuality.MISSING
+) {
+    constructor(usage: ChatCompletionUsage) : this(
+        usage.promptTokens,
+        usage.completionTokens,
+        usage.totalTokens,
+        usage.quality
+    )
+
+    operator fun plus(other: AnalysisUsage): AnalysisUsage = AnalysisUsage(
+        promptTokens = promptTokens.addKnown(other.promptTokens),
+        completionTokens = completionTokens.addKnown(other.completionTokens),
+        totalTokens = totalTokens.addKnown(other.totalTokens),
+        quality = quality.combine(other.quality)
+    )
+}
+
+private fun Int?.addKnown(other: Int?): Int? = when {
+    this == null -> other
+    other == null -> this
+    else -> this + other
+}
+
+private fun UsageQuality.combine(other: UsageQuality): UsageQuality = when {
+    this == UsageQuality.MISSING && other == UsageQuality.MISSING -> UsageQuality.MISSING
+    this == UsageQuality.COMPLETE && other == UsageQuality.COMPLETE -> UsageQuality.COMPLETE
+    else -> UsageQuality.PARTIAL
+}
+
+data class AnalysisProgress(
+    val completed: Int,
+    val usage: AnalysisUsage
+)
+
+data class AnalysisRunResult(
+    val chapterCount: Int,
+    val completed: Int,
+    val message: String,
+    val usage: AnalysisUsage = AnalysisUsage()
+)
+
+class AnalysisFailureException(
+    val failure: com.storybrain.app.settings.NetworkFailure,
+    val failedBatch: Int,
+    val totalBatches: Int,
+    cause: Throwable
+) : Exception(failure.message, cause)

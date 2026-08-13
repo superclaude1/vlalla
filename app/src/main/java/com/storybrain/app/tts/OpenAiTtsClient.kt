@@ -11,13 +11,16 @@ import org.json.JSONObject
 
 class OpenAiTtsClient(
     baseUrl: String,
+    allowInsecureForTests: Boolean = false,
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 ) {
-    private val baseUrl = baseUrl.trim().trimEnd('/')
+    private val baseUrl = baseUrl.trim().trimEnd('/').also {
+        require(allowInsecureForTests || it.startsWith("https://", true)) { "兼容 TTS URL 必须使用 HTTPS" }
+    }
 
     fun listModels(apiKey: String): List<String> {
         val request = authorize(Request.Builder().url("$baseUrl/models"), apiKey).get().build()
@@ -29,21 +32,21 @@ class OpenAiTtsClient(
         }
     }
 
-    fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File) {
+    fun synthesize(request: TtsSynthesisRequest, apiKey: String, output: File): TtsAudioArtifact {
         require(request.text.length <= 4_096) { "兼容 TTS 单段不能超过4096字符" }
         require(request.voice.isNotBlank()) { "兼容 TTS 需要配置音色 ID" }
         val body = JSONObject()
             .put("model", request.model)
             .put("input", request.text)
             .put("voice", request.voice.removePrefix("openai:"))
-            .put("response_format", request.format)
+            .put("response_format", request.format.takeUnless { it.equals("auto", ignoreCase = true) }.orEmpty().ifBlank { "mp3" })
             .put("speed", (request.speed * request.directives.rate).coerceIn(0.25f, 4f))
         if (request.supportsInstructions) {
             TtsDirectiveRenderer.instructions(request.directives).takeIf(String::isNotBlank)?.let { body.put("instructions", it) }
         }
         val httpRequest = authorize(Request.Builder().url("$baseUrl/audio/speech"), apiKey)
             .post(body.toString().toRequestBody(JSON)).build()
-        client.newCall(httpRequest).execute().use { response ->
+        return client.newCall(httpRequest).execute().use { response ->
             if (!response.isSuccessful) throw error(response.code, response.body?.string())
             val contentType = response.header("Content-Type").orEmpty()
             if (!contentType.startsWith("audio/") && contentType != "application/octet-stream") {
@@ -55,6 +58,11 @@ class OpenAiTtsClient(
             if (part.length() == 0L) { part.delete(); throw TtsProviderException(response.code, true, "兼容 TTS 返回空音频") }
             if (output.exists()) output.delete()
             if (!part.renameTo(output)) { part.delete(); throw TtsProviderException(null, false, "无法保存兼容 TTS 音频") }
+            if (contentType.substringBefore(';').trim().equals("application/octet-stream", ignoreCase = true)) {
+                artifactForAudio(output, mimeForFormat(request.format))
+            } else {
+                artifactForAudio(output, contentType)
+            }
         }
     }
 
@@ -67,6 +75,19 @@ class OpenAiTtsClient(
                 ?: JSONObject(text.orEmpty()).optString("message")
         }.getOrNull().orEmpty()
         return TtsProviderException(code, code == 429 || code >= 500, message.ifBlank { "兼容 TTS 请求失败（HTTP $code）" })
+    }
+
+    private fun effectiveFormat(format: String): String =
+        format.takeUnless { it.equals("auto", ignoreCase = true) }.orEmpty().ifBlank { "mp3" }
+
+    private fun mimeForFormat(format: String): String = when (effectiveFormat(format).lowercase()) {
+        "wav" -> "audio/wav"
+        "ogg", "opus" -> "audio/ogg"
+        "aac", "m4a" -> "audio/aac"
+        "flac" -> "audio/flac"
+        "webm" -> "audio/webm"
+        "pcm" -> "audio/pcm"
+        else -> "audio/mpeg"
     }
 
     private companion object { val JSON = "application/json; charset=utf-8".toMediaType() }

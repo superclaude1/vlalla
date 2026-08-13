@@ -8,9 +8,10 @@ object TtsProfileIds {
     const val EDGE = "edge-default"
     const val FISH = "fish-default"
     const val OPENAI = "openai-compatible-default"
+    const val ANDROID_SYSTEM = "android-system-default"
 }
 
-enum class TtsProviderKind { EDGE, FISH_AUDIO, OPENAI_COMPATIBLE }
+enum class TtsProviderKind { EDGE, FISH_AUDIO, OPENAI_COMPATIBLE, ANDROID_SYSTEM }
 enum class TtsVoiceRole { NARRATOR, MALE, FEMALE, UNKNOWN }
 
 @Entity(tableName = "tts_provider_profiles")

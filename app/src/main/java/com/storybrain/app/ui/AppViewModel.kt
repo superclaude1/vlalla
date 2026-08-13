@@ -7,26 +7,37 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.storybrain.app.StoryBrainApplication
 import com.storybrain.app.analysis.LlmStoryAnalyzer
+import com.storybrain.app.analysis.AnalysisFailureException
+import com.storybrain.app.analysis.AnalysisRunResult
+import com.storybrain.app.analysis.AnalysisProgress
 import com.storybrain.app.analysis.CharacterChatService
 import com.storybrain.app.data.TaskStatus
+import com.storybrain.app.data.TaskRunType
 import com.storybrain.app.data.ChatSessionEntity
 import com.storybrain.app.data.MemoryItemEntity
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.MemoryWithSelection
 import com.storybrain.app.data.BookTtsSettingEntity
+import com.storybrain.app.data.BookNarratorBindingEntity
 import com.storybrain.app.data.CharacterVoiceBindingEntity
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.importer.ImportedNovel
 import com.storybrain.app.importer.NovelStreamImporter
 import com.storybrain.app.export.Neo4jExporter
 import com.storybrain.app.settings.LlmSettingsStore
+import com.storybrain.app.settings.NetworkFailureClassifier
+import com.storybrain.app.settings.RequestStage
 import com.storybrain.app.settings.TtsSettingsStore
+import com.storybrain.app.settings.UsageQuality
 import com.storybrain.app.tts.ChapterAudioPlayer
 import com.storybrain.app.tts.ChapterTtsEngine
+import com.storybrain.app.tts.EdgeTtsException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 
 data class ImportUiState(
@@ -41,7 +52,45 @@ data class AnalysisUiState(
     val bookId: String? = null,
     val running: Boolean = false,
     val message: String? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val failureStage: String? = null,
+    val failedBatch: Int? = null,
+    val totalBatches: Int? = null,
+    val retryAttempt: Int = 0,
+    val status: AnalysisStatus = AnalysisStatus.IDLE,
+    val completedChapters: Int = 0,
+    val promptTokens: Int? = null,
+    val completionTokens: Int? = null,
+    val totalTokens: Int? = null,
+    val usageQuality: UsageQuality = UsageQuality.MISSING,
+    val cost: String = "费用未知"
+)
+
+enum class AnalysisStatus { IDLE, RUNNING, SUCCESS, FAILED, SKIPPED, CANCELLED }
+
+fun AnalysisUiState.withProgress(progress: AnalysisProgress): AnalysisUiState = copy(
+    completedChapters = progress.completed,
+    promptTokens = progress.usage.promptTokens,
+    completionTokens = progress.usage.completionTokens,
+    totalTokens = progress.usage.totalTokens,
+    usageQuality = progress.usage.quality
+)
+
+fun AnalysisUiState.asFailure(message: String, failure: AnalysisFailureException?): AnalysisUiState = copy(
+    running = false,
+    message = message,
+    isError = true,
+    status = AnalysisStatus.FAILED,
+    failureStage = failure?.failure?.stage?.let { stage ->
+        when (stage) {
+            RequestStage.REQUEST -> "请求"
+            RequestStage.RESPONSE -> "响应"
+            RequestStage.PARSE -> "解析"
+        }
+    },
+    failedBatch = failure?.failedBatch,
+    totalBatches = failure?.totalBatches,
+    retryAttempt = failure?.failure?.attempt ?: 0
 )
 
 data class CharacterChatUiState(
@@ -59,7 +108,19 @@ data class TtsUiState(
     val isError: Boolean = false
 )
 
-data class ExportUiState(val running: Boolean = false, val message: String? = null, val isError: Boolean = false)
+data class ExportUiState(
+    val bookId: String? = null,
+    val requestId: Long = 0L,
+    val running: Boolean = false,
+    val message: String? = null,
+    val isError: Boolean = false
+)
+
+object Neo4jExportRequestPolicy {
+    fun canStart(state: ExportUiState): Boolean = !state.running
+    fun matches(state: ExportUiState, bookId: String, requestId: Long): Boolean =
+        state.bookId == bookId && state.requestId == requestId
+}
 
 enum class MemorySelectionScope { DEFAULT, SESSION }
 
@@ -68,6 +129,7 @@ data class MemoryPickerUiState(
     val characterId: String? = null,
     val sessionId: String? = null,
     val query: String = "",
+    val requestId: Long = 0L,
     val loading: Boolean = false,
     val items: List<MemoryWithSelection> = emptyList(),
     val suggestions: List<MemoryWithSelection> = emptyList(),
@@ -75,29 +137,46 @@ data class MemoryPickerUiState(
     val isError: Boolean = false
 )
 
+object MemoryPickerRequestPolicy {
+    fun matches(state: MemoryPickerUiState, bookId: String, characterId: String, sessionId: String, query: String, requestId: Long): Boolean =
+        state.bookId == bookId && state.characterId == characterId && state.sessionId == sessionId &&
+            state.query == query && state.requestId == requestId
+}
+
 data class MemoryActionUiState(val running: Boolean = false, val message: String? = null, val isError: Boolean = false)
+
+enum class ReaderMode { PLAIN_TEXT, DIALOGUE }
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = (application as StoryBrainApplication).repository
-    private val analyzer = LlmStoryAnalyzer(repository, LlmSettingsStore(application))
-    private val characterChat = CharacterChatService(repository, LlmSettingsStore(application))
+    private val llmSettings = LlmSettingsStore(application, repository)
+    private val analyzer = LlmStoryAnalyzer(repository, llmSettings)
+    private val characterChat = CharacterChatService(repository, llmSettings)
     private val ttsSettings = TtsSettingsStore(application)
     private val ttsEngine = ChapterTtsEngine(application, repository, ttsSettings)
     private val audioPlayer = ChapterAudioPlayer()
     private val _importState = MutableStateFlow(ImportUiState())
     val importState = _importState.asStateFlow()
+    private var importInProgress = false
+    private var deletingBookId: String? = null
     private val _analysisState = MutableStateFlow(AnalysisUiState())
     val analysisState = _analysisState.asStateFlow()
+    private var analysisJob: Job? = null
     private val _characterChatState = MutableStateFlow(CharacterChatUiState())
     val characterChatState = _characterChatState.asStateFlow()
     private val _ttsState = MutableStateFlow(TtsUiState())
     val ttsState = _ttsState.asStateFlow()
+    private var ttsJob: Job? = null
     private val _exportState = MutableStateFlow(ExportUiState())
     val exportState = _exportState.asStateFlow()
+    private var exportRequestSequence = 0L
     private val _memoryPickerState = MutableStateFlow(MemoryPickerUiState())
     val memoryPickerState = _memoryPickerState.asStateFlow()
+    private var memoryPickerRequestSequence = 0L
     private val _memoryActionState = MutableStateFlow(MemoryActionUiState())
     val memoryActionState = _memoryActionState.asStateFlow()
+    private val _readerMode = MutableStateFlow(ReaderMode.PLAIN_TEXT)
+    val readerMode = _readerMode.asStateFlow()
     private val memoryPreferences = application.getSharedPreferences("memory_library_v3", Application.MODE_PRIVATE)
 
     init {
@@ -113,6 +192,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun chapters(bookId: String) = repository.observeChapters(bookId)
     fun chapter(chapterId: String) = repository.observeChapter(chapterId)
     fun characters(bookId: String) = repository.observeCharacters(bookId)
+    fun chapterCharacters(chapterId: String) = repository.observeChapterCharacters(chapterId)
     fun relations(bookId: String) = repository.observeRelations(bookId)
     fun plotNodes(bookId: String) = repository.observePlotNodes(bookId)
     fun chatMessages(sessionId: String) = repository.observeChatMessages(sessionId)
@@ -124,7 +204,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun ttsVoicePool(profileId: String) = repository.observeTtsVoicePool(profileId)
     fun bookTtsSetting(bookId: String) = repository.observeBookTtsSetting(bookId)
     fun activeVoiceBindings(bookId: String) = repository.observeActiveCharacterVoiceBindings(bookId)
+    fun activeNarratorBinding(bookId: String) = repository.observeActiveNarratorBinding(bookId)
+    val taskEvents = repository.observeTaskEvents()
 
+    fun clearTaskEvents() {
+        viewModelScope.launch { repository.clearTaskEvents() }
+    }
     fun setBookPrimaryProfile(bookId: String, profileId: String?) {
         viewModelScope.launch { repository.setBookPrimaryProfile(bookId, profileId) }
     }
@@ -144,6 +229,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearCharacterVoice(characterId: String) {
         viewModelScope.launch { repository.clearCharacterVoiceBinding(characterId) }
+    }
+
+    fun assignNarratorVoice(bookId: String, profileId: String, voiceId: String, voiceName: String) {
+        viewModelScope.launch {
+            repository.setNarratorBinding(BookNarratorBindingEntity(bookId, profileId, voiceId, voiceName))
+        }
+    }
+
+    fun clearNarratorVoice(bookId: String) {
+        viewModelScope.launch { repository.clearNarratorBinding(bookId) }
     }
 
     fun assignCharacterVoice(characterId: String, voiceId: String) {
@@ -180,17 +275,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _importState.value = _importState.value.copy(title = title)
     }
 
+    @Synchronized
     fun confirmImport(onComplete: (String) -> Unit) {
+        if (importInProgress) return
         val state = _importState.value
         val novel = state.novel ?: return
+        importInProgress = true
+        _importState.value = state.copy(loading = true)
         viewModelScope.launch {
-            _importState.value = state.copy(loading = true)
             runCatching { repository.saveImportedNovel(novel, state.sourceName, state.title) }
                 .onSuccess { id ->
+                    importInProgress = false
                     _importState.value = ImportUiState()
                     onComplete(id)
                 }
-                .onFailure { _importState.value = state.copy(loading = false, error = it.message) }
+                .onFailure { importInProgress = false; _importState.value = state.copy(loading = false, error = it.message) }
         }
     }
 
@@ -200,13 +299,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateReadingProgress(bookId, chapterIndex) }
     }
 
+    fun setReaderMode(mode: ReaderMode) {
+        _readerMode.value = mode
+    }
+
+    @Synchronized
     fun generateChapterTts(bookId: String, chapterId: String) {
-        if (_ttsState.value.running) return
-        viewModelScope.launch {
+        if (_ttsState.value.running || deletingBookId != null) return
+        // Publish ownership before any suspend point so generate/delete are mutually exclusive.
+        _ttsState.value = TtsUiState(chapterId = chapterId, running = true, progress = "准备章节文本…")
+        ttsJob = viewModelScope.launch {
             audioPlayer.stop()
-            repository.updateTtsStatus(chapterId, TaskStatus.QUEUED)
-            _ttsState.value = TtsUiState(chapterId = chapterId, running = true, progress = "准备章节文本…")
             runCatching {
+                repository.updateTtsStatus(chapterId, TaskStatus.QUEUED)
                 withContext(Dispatchers.IO) {
                     ttsEngine.generate(
                         bookId,
@@ -223,6 +328,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     message = "本章配音已生成（${result.segmentCount} 段）"
                 )
             }.onFailure { error ->
+                if (error is CancellationException) {
+                    _ttsState.value = TtsUiState(chapterId = chapterId, message = "已取消章节配音生成")
+                    return@onFailure
+                }
+                if (error is EdgeTtsException) {
+                    val network = NetworkFailureClassifier.classify(
+                        error,
+                        stage = RequestStage.RESPONSE
+                    )
+                    viewModelScope.launch(Dispatchers.IO) {
+                        repository.recordTaskFailure(
+                            taskType = TaskRunType.TTS,
+                            targetId = chapterId,
+                            eventType = "ERROR",
+                            stage = network.stage.name,
+                            retryable = error.retryable && network.retryable,
+                            statusCode = network.statusCode,
+                            attempt = network.attempt,
+                            message = network.message
+                        )
+                    }
+                }
                 _ttsState.value = TtsUiState(
                     chapterId = chapterId,
                     message = error.message ?: "章节配音失败",
@@ -230,6 +357,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    fun cancelChapterTtsGeneration() {
+        if (_ttsState.value.running) ttsJob?.cancel()
     }
 
     fun playChapterTts(chapterId: String, manifestPath: String) {
@@ -250,33 +381,90 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun analyzeBook(bookId: String, chapterCount: Int? = null) {
         if (_analysisState.value.running) return
-        viewModelScope.launch {
-            _analysisState.value = AnalysisUiState(bookId = bookId, running = true, message = "正在调用 LLM 分析…")
-            runCatching { withContext(Dispatchers.IO) { analyzer.analyzeNext(bookId, chapterCount) } }
+        analysisJob = viewModelScope.launch {
+            _analysisState.value = AnalysisUiState(bookId = bookId, running = true, status = AnalysisStatus.RUNNING, message = "正在调用 LLM 分析…")
+            runCatching { withContext(Dispatchers.IO) { analyzer.analyzeNext(bookId, chapterCount) { progress ->
+                _analysisState.value = _analysisState.value.withProgress(progress)
+            } } }
                 .onSuccess { result ->
-                    _analysisState.value = AnalysisUiState(bookId = bookId, message = result.message)
+                    publishAnalysisSuccess(bookId, result)
                 }
                 .onFailure { error ->
-                    _analysisState.value = AnalysisUiState(
-                        bookId = bookId,
-                        message = error.message ?: "LLM 分析失败",
-                        isError = true
-                    )
+                    if (error is CancellationException) {
+                        _analysisState.value = _analysisState.value.copy(running = false, status = AnalysisStatus.CANCELLED, message = "已取消分析")
+                        return@onFailure
+                    }
+                    publishAnalysisFailure(error)
                 }
         }
     }
 
+    fun analyzeAll(bookId: String) {
+        if (_analysisState.value.running) return
+        analysisJob = viewModelScope.launch {
+            _analysisState.value = AnalysisUiState(bookId = bookId, running = true, status = AnalysisStatus.RUNNING, message = "正在分析剩余全部章节…")
+            runCatching { withContext(Dispatchers.IO) { analyzer.analyzeAll(bookId) { progress ->
+                _analysisState.value = _analysisState.value.withProgress(progress)
+            } } }
+                .onSuccess { result -> publishAnalysisSuccess(bookId, result) }
+                .onFailure { error ->
+                    if (error is CancellationException) {
+                        _analysisState.value = _analysisState.value.copy(running = false, status = AnalysisStatus.CANCELLED, message = "已取消分析")
+                        return@onFailure
+                    }
+                    publishAnalysisFailure(error)
+                }
+        }
+    }
+
+    fun cancelAnalysis() {
+        if (_analysisState.value.running) analysisJob?.cancel()
+    }
+
+    private fun publishAnalysisSuccess(bookId: String, result: AnalysisRunResult) {
+        _analysisState.value = AnalysisUiState(
+            bookId = bookId,
+            status = if (result.chapterCount == 0) AnalysisStatus.SKIPPED else AnalysisStatus.SUCCESS,
+            message = result.message,
+            completedChapters = result.completed,
+            promptTokens = result.usage.promptTokens,
+            completionTokens = result.usage.completionTokens,
+            totalTokens = result.usage.totalTokens,
+            usageQuality = result.usage.quality,
+            cost = "费用未知"
+        )
+    }
+
+    private fun publishAnalysisFailure(error: Throwable) {
+                    val analysisFailure = error as? AnalysisFailureException
+                    _analysisState.value = _analysisState.value.asFailure(error.message ?: "LLM 分析失败", analysisFailure)
+    }
+
+    @Synchronized
     fun deleteBook(bookId: String, onComplete: () -> Unit = {}, onError: (String) -> Unit = {}) {
+        if (_ttsState.value.running) { onError("请等待当前章节配音生成完成后再删除"); return }
+        if (deletingBookId != null) return
+        deletingBookId = bookId
         viewModelScope.launch {
             runCatching {
                 val chapterIds = repository.getChapters(bookId).map { it.id }
                 audioPlayer.stop()
-                repository.deleteBook(bookId)
-                withContext(Dispatchers.IO) { ttsEngine.deleteAudio(chapterIds) }
+                withContext(Dispatchers.IO) {
+                    val trash = ttsEngine.stageAudioDeletion(bookId, chapterIds)
+                    try {
+                        repository.deleteBook(bookId)
+                        ttsEngine.commitAudioDeletion(trash)
+                    } catch (error: Throwable) {
+                        ttsEngine.restoreAudioDeletion(trash)
+                        throw error
+                    }
+                }
             }.onSuccess {
+                deletingBookId = null
                 _ttsState.value = TtsUiState()
                 onComplete()
             }.onFailure { error ->
+                deletingBookId = null
                 onError(error.message ?: "删除小说失败")
             }
         }
@@ -306,18 +494,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { repository.createSession(bookId, characterId) }
                 .onSuccess { onReady(it.id) }
-                .onFailure { _characterChatState.value = CharacterChatUiState(characterId, error = it.message) }
+                .onFailure { _characterChatState.value = CharacterChatUiState(characterId, error = it.message ?: "创建对话失败") }
         }
     }
 
-    fun renameChatSession(sessionId: String, title: String) {
-        viewModelScope.launch { repository.renameSession(sessionId, title) }
+    fun renameChatSession(sessionId: String, characterId: String, title: String) {
+        viewModelScope.launch {
+            runCatching { repository.renameSession(sessionId, title) }
+                .onFailure { _characterChatState.value = CharacterChatUiState(characterId = characterId, error = it.message ?: "重命名对话失败") }
+        }
     }
 
     fun deleteChatSession(sessionId: String, bookId: String, characterId: String, onReady: (String) -> Unit) {
         viewModelScope.launch {
-            repository.deleteSession(sessionId)
-            onReady(repository.getOrCreateSession(bookId, characterId).id)
+            runCatching {
+                repository.deleteSession(sessionId)
+                repository.getOrCreateSession(bookId, characterId).id
+            }.onSuccess(onReady)
+                .onFailure { _characterChatState.value = CharacterChatUiState(characterId = characterId, error = it.message ?: "删除对话失败") }
         }
     }
 
@@ -345,8 +539,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun clearCharacterChat(sessionId: String) {
-        viewModelScope.launch { repository.clearChatMessages(sessionId) }
+    fun clearCharacterChat(sessionId: String, characterId: String) {
+        viewModelScope.launch {
+            runCatching { repository.clearChatMessages(sessionId) }
+                .onFailure { _characterChatState.value = CharacterChatUiState(characterId = characterId, error = it.message ?: "清空对话失败") }
+        }
     }
 
     fun loadMemoryPicker(
@@ -356,15 +553,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         query: String = _memoryPickerState.value.query,
         suggestionText: String = ""
     ) {
+        val requestId = ++memoryPickerRequestSequence
+        _memoryPickerState.value = _memoryPickerState.value.copy(
+            bookId = bookId,
+            characterId = characterId,
+            sessionId = sessionId,
+            query = query,
+            requestId = requestId,
+            loading = true,
+            items = emptyList(),
+            suggestions = emptyList(),
+            message = null
+        )
         viewModelScope.launch {
-            _memoryPickerState.value = _memoryPickerState.value.copy(
-                bookId = bookId,
-                characterId = characterId,
-                sessionId = sessionId,
-                query = query,
-                loading = true,
-                message = null
-            )
             runCatching {
                 withContext(Dispatchers.IO) {
                     val book = repository.getBook(bookId) ?: error("找不到这本小说")
@@ -375,6 +576,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     items to suggestions
                 }
             }.onSuccess { (items, suggestions) ->
+                if (!MemoryPickerRequestPolicy.matches(_memoryPickerState.value, bookId, characterId, sessionId, query, requestId)) return@onSuccess
                 _memoryPickerState.value = _memoryPickerState.value.copy(
                     loading = false,
                     items = items,
@@ -382,6 +584,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isError = false
                 )
             }.onFailure { error ->
+                if (!MemoryPickerRequestPolicy.matches(_memoryPickerState.value, bookId, characterId, sessionId, query, requestId)) return@onFailure
                 _memoryPickerState.value = _memoryPickerState.value.copy(
                     loading = false,
                     message = error.message ?: "记忆加载失败",
@@ -402,8 +605,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     MemorySelectionScope.SESSION -> repository.setSessionMemory(characterId, sessionId, memoryId, selected)
                 }
             }.onSuccess {
+                if (_memoryPickerState.value.requestId != state.requestId || _memoryPickerState.value.sessionId != sessionId) return@onSuccess
                 loadMemoryPicker(state.bookId.orEmpty(), characterId, sessionId, state.query)
             }.onFailure { error ->
+                if (_memoryPickerState.value.requestId != state.requestId || _memoryPickerState.value.sessionId != sessionId) return@onFailure
                 _memoryPickerState.value = _memoryPickerState.value.copy(
                     message = error.message ?: "记忆选择失败",
                     isError = true
@@ -450,9 +655,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun prepareNeo4jExport(bookId: String, onReady: (String) -> Unit) {
+    @Synchronized
+    fun prepareNeo4jExport(bookId: String, onReady: (Long, String) -> Unit): Long? {
+        if (!Neo4jExportRequestPolicy.canStart(_exportState.value)) return null
+        val requestId = ++exportRequestSequence
+        _exportState.value = ExportUiState(bookId = bookId, requestId = requestId, running = true)
         viewModelScope.launch {
-            _exportState.value = ExportUiState(running = true)
             runCatching {
                 withContext(Dispatchers.IO) {
                     val book = repository.getBook(bookId) ?: error("找不到这本小说")
@@ -464,15 +672,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onSuccess { content ->
-                _exportState.value = ExportUiState()
-                onReady(content)
+                if (!Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) return@onSuccess
+                // Keep the request busy while the system document picker is open.
+                _exportState.value = ExportUiState(bookId = bookId, requestId = requestId, running = true)
+                onReady(requestId, content)
             }.onFailure { error ->
-                _exportState.value = ExportUiState(message = error.message ?: "Neo4j 导出失败", isError = true)
+                if (Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) {
+                    _exportState.value = ExportUiState(bookId, requestId, message = error.message ?: "Neo4j 导出失败", isError = true)
+                }
             }
+        }
+        return requestId
+    }
+
+    fun cancelNeo4jExport(bookId: String, requestId: Long) {
+        if (Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) {
+            _exportState.value = ExportUiState()
         }
     }
 
-    fun writeNeo4jExport(uri: Uri, content: String) {
+    fun writeNeo4jExport(bookId: String, requestId: Long, uri: Uri, content: String) {
+        if (!Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) return
+        _exportState.value = _exportState.value.copy(running = true, message = null, isError = false)
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -481,9 +702,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     } ?: error("无法写入导出文件")
                 }
             }.onSuccess {
-                _exportState.value = ExportUiState(message = "Neo4j Cypher 已导出")
+                if (Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) {
+                    _exportState.value = ExportUiState(bookId, requestId, message = "Neo4j Cypher 已导出")
+                }
             }.onFailure { error ->
-                _exportState.value = ExportUiState(message = error.message ?: "导出文件写入失败", isError = true)
+                if (Neo4jExportRequestPolicy.matches(_exportState.value, bookId, requestId)) {
+                    _exportState.value = ExportUiState(bookId, requestId, message = error.message ?: "导出文件写入失败", isError = true)
+                }
             }
         }
     }

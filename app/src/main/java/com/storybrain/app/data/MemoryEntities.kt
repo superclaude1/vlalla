@@ -8,6 +8,8 @@ import androidx.room.Index
 
 enum class MemoryType { PLOT, RELATION, EXCERPT, NOTE, CHAT }
 
+enum class MemoryEvidenceSource { ANALYSIS, USER, LEGACY_MEMORY_ITEM }
+
 @Entity(
     tableName = "memory_items",
     primaryKeys = ["id"],
@@ -37,6 +39,37 @@ data class MemoryItemEntity(
     val editable: Boolean = false,
     val createdAt: Long,
     val updatedAt: Long
+)
+
+@Entity(
+    tableName = "character_memory_evidence",
+    primaryKeys = ["memoryId", "characterId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = MemoryItemEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["memoryId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = StoryCharacterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["characterId"],
+            onDelete = ForeignKey.CASCADE
+        )
+    ],
+    indices = [Index("memoryId"), Index("characterId")]
+)
+data class CharacterMemoryEvidenceEntity(
+    val memoryId: String,
+    val characterId: String,
+    val chapterStartIndex: Int?,
+    val chapterEndIndex: Int?,
+    val characterIdsJson: String,
+    val source: String,
+    val confidence: Float,
+    val invalidatedAt: Long? = null,
+    val spoilerBoundaryChapterIndex: Int?
 )
 
 @Fts4

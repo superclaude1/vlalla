@@ -25,11 +25,11 @@ class EdgeTtsClient {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun synthesize(text: String, voice: String, output: File) {
-        synthesize(text, voice, TtsDirectives(), output)
+    fun synthesize(text: String, voice: String, output: File): TtsAudioArtifact {
+        return synthesize(text, voice, TtsDirectives(), output)
     }
 
-    fun synthesize(text: String, voice: String, directives: TtsDirectives, output: File) {
+    fun synthesize(text: String, voice: String, directives: TtsDirectives, output: File): TtsAudioArtifact {
         require(text.isNotBlank()) { "配音文本不能为空" }
         val requestId = connectionId()
         val url = "$WSS_URL&ConnectionId=${connectionId()}" +
@@ -113,6 +113,7 @@ class EdgeTtsClient {
             temporary.delete()
             throw EdgeTtsException("无法保存配音文件")
         }
+        return TtsAudioArtifact(output, "audio/mpeg", "mp3")
     }
 
     private fun generateSecMsGec(): String {
@@ -179,4 +180,7 @@ class EdgeTtsClient {
     }
 }
 
-class EdgeTtsException(message: String) : Exception(message)
+class EdgeTtsException(
+    message: String,
+    val retryable: Boolean = true
+) : Exception(message)

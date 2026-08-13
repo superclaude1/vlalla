@@ -165,6 +165,7 @@ fun MemoryPickerSheet(
     onDismiss: () -> Unit
 ) {
     val state by viewModel.memoryPickerState.collectAsStateWithLifecycle()
+    val stateMatches = state.bookId == bookId && state.characterId == characterId && state.sessionId == sessionId
     var query by rememberSaveable { mutableStateOf("") }
     var type by rememberSaveable { mutableStateOf<String?>(null) }
     var onlyCharacter by rememberSaveable { mutableStateOf(false) }
@@ -175,12 +176,12 @@ fun MemoryPickerSheet(
     LaunchedEffect(query) {
         viewModel.loadMemoryPicker(bookId, characterId, sessionId, query, suggestionText)
     }
-    val filtered = state.items.filter { memory ->
+    val filtered = if (stateMatches) state.items.filter { memory ->
         (type == null || memory.type == type) &&
             (!onlyCharacter || characterId in MemorySearch.jsonStrings(memory.characterIdsJson)) &&
             (chapterText.toIntOrNull()?.let { limit -> (memory.chapterEndIndex ?: -1) < limit } ?: true)
-    }
-    val selected = state.items.filter { !it.isLocked && (it.isDefault || it.isSession) }.distinctBy { it.id }
+    } else emptyList()
+    val selected = if (stateMatches) state.items.filter { !it.isLocked && (it.isDefault || it.isSession) }.distinctBy { it.id } else emptyList()
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
             Text("选择对话记忆", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 16.dp))
@@ -212,7 +213,7 @@ fun MemoryPickerSheet(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
             )
-            state.message?.let {
+            state.message.takeIf { stateMatches }?.let {
                 Text(it, color = if (state.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary, modifier = Modifier.padding(16.dp, 4.dp))
             }
             LazyColumn(
@@ -220,13 +221,13 @@ fun MemoryPickerSheet(
                 contentPadding = PaddingValues(16.dp, 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (state.suggestions.isNotEmpty() && query.isBlank()) {
+                if (stateMatches && state.suggestions.isNotEmpty() && query.isBlank()) {
                     item { Text("根据当前输入推荐（不会自动使用）", fontWeight = FontWeight.Bold) }
                     items(state.suggestions, key = { "suggest-${it.id}" }) { memory ->
                         MemorySelectionCard(
                             memory = memory,
-                            onDefaultChange = { viewModel.setMemorySelected(memory.id, MemorySelectionScope.DEFAULT, it) },
-                            onSessionChange = { viewModel.setMemorySelected(memory.id, MemorySelectionScope.SESSION, it) }
+                            onDefaultChange = { if (!state.loading) viewModel.setMemorySelected(memory.id, MemorySelectionScope.DEFAULT, it) },
+                            onSessionChange = { if (!state.loading) viewModel.setMemorySelected(memory.id, MemorySelectionScope.SESSION, it) }
                         )
                     }
                     item { HorizontalDivider(Modifier.padding(vertical = 6.dp)) }
@@ -235,8 +236,8 @@ fun MemoryPickerSheet(
                 items(filtered, key = { it.id }) { memory ->
                     MemorySelectionCard(
                         memory = memory,
-                        onDefaultChange = { viewModel.setMemorySelected(memory.id, MemorySelectionScope.DEFAULT, it) },
-                        onSessionChange = { viewModel.setMemorySelected(memory.id, MemorySelectionScope.SESSION, it) }
+                        onDefaultChange = { if (!state.loading) viewModel.setMemorySelected(memory.id, MemorySelectionScope.DEFAULT, it) },
+                        onSessionChange = { if (!state.loading) viewModel.setMemorySelected(memory.id, MemorySelectionScope.SESSION, it) }
                     )
                 }
                 if (filtered.isEmpty()) item { Text("没有匹配的可用记忆", modifier = Modifier.padding(24.dp)) }
@@ -356,13 +357,13 @@ fun MemoryEditorDialog(
                 )
                 OutlinedTextField(
                     content,
-                    { content = it.take(2_000) },
+                    { content = it },
                     label = { Text("记忆内容") },
                     minLines = 4,
                     maxLines = 8,
                     modifier = Modifier.testTag("memory-editor-content")
                 )
-                Text("${content.length}/2000 字", style = MaterialTheme.typography.labelSmall)
+                Text("${content.length} 字", style = MaterialTheme.typography.labelSmall)
             }
         },
         dismissButton = {

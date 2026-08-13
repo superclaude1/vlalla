@@ -15,7 +15,18 @@ internal object CharacterIdentityMatcher {
         incomingAliases: List<String>
     ): StoryCharacterEntity? {
         val candidates = (listOf(incomingName) + incomingAliases).map(String::trim).filter(String::isNotBlank).toSet()
-        return existing.firstOrNull { names(it).any(candidates::contains) }
+        val index = unambiguousNameIndex(existing)
+        return candidates.asSequence().mapNotNull(index::get).firstOrNull()
+    }
+
+    /** Builds an identity index without allowing a conflicting alias to pick an arbitrary row. */
+    fun unambiguousNameIndex(existing: List<StoryCharacterEntity>): Map<String, StoryCharacterEntity> {
+        val grouped = existing.flatMap { character -> names(character).map { it to character } }
+            .groupBy({ it.first }, { it.second.id to it.second })
+        return grouped.mapNotNull { (name, matches) ->
+            val distinct = matches.distinctBy { it.first }
+            if (distinct.size == 1) name to distinct.single().second else null
+        }.toMap()
     }
 
     fun mergedAliases(

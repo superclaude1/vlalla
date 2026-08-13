@@ -9,6 +9,36 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface StoryDao {
+    @Query("SELECT * FROM llm_api_profiles ORDER BY createdAt, id")
+    fun observeLlmApiProfiles(): Flow<List<LlmApiProfileEntity>>
+
+    @Query("SELECT * FROM llm_api_profiles ORDER BY createdAt, id")
+    suspend fun getLlmApiProfiles(): List<LlmApiProfileEntity>
+
+    @Query("SELECT * FROM llm_api_profiles WHERE id = :profileId")
+    suspend fun getLlmApiProfile(profileId: String): LlmApiProfileEntity?
+
+    @Upsert
+    suspend fun upsertLlmApiProfile(profile: LlmApiProfileEntity)
+
+    @Query("UPDATE llm_api_profiles SET selectedModel = :modelId, updatedAt = :updatedAt WHERE id = :profileId")
+    suspend fun selectLlmModel(profileId: String, modelId: String, updatedAt: Long)
+
+    @Query("DELETE FROM llm_api_profiles WHERE id = :profileId")
+    suspend fun deleteLlmApiProfile(profileId: String)
+
+    @Query("SELECT * FROM llm_models ORDER BY apiProfileId, modelId")
+    fun observeLlmModels(): Flow<List<LlmModelEntity>>
+
+    @Query("SELECT * FROM llm_models ORDER BY apiProfileId, modelId")
+    suspend fun getLlmModels(): List<LlmModelEntity>
+
+    @Query("DELETE FROM llm_models WHERE apiProfileId = :profileId")
+    suspend fun deleteLlmModels(profileId: String)
+
+    @Upsert
+    suspend fun upsertLlmModels(models: List<LlmModelEntity>)
+
     @Query("SELECT * FROM books ORDER BY importedAt DESC")
     fun observeBooks(): Flow<List<BookEntity>>
 
@@ -44,6 +74,9 @@ interface StoryDao {
 
     @Query("SELECT * FROM characters WHERE bookId = :bookId ORDER BY firstChapterIndex")
     fun observeCharacters(bookId: String): Flow<List<StoryCharacterEntity>>
+
+    @Query("SELECT c.* FROM characters c JOIN chapter_character_mentions m ON m.characterId = c.id WHERE m.chapterId = :chapterId ORDER BY m.confidence DESC, c.firstChapterIndex")
+    fun observeChapterCharacters(chapterId: String): Flow<List<StoryCharacterEntity>>
 
     @Query("SELECT * FROM relations WHERE bookId = :bookId")
     fun observeRelations(bookId: String): Flow<List<StoryRelationEntity>>
@@ -98,6 +131,9 @@ interface StoryDao {
 
     @Query("DELETE FROM character_voice_bindings WHERE characterId = :characterId")
     suspend fun clearCharacterVoiceBindings(characterId: String)
+
+    @Query("SELECT * FROM book_narrator_bindings WHERE bookId = :bookId AND active = 1 LIMIT 1")
+    fun observeActiveNarratorBinding(bookId: String): Flow<BookNarratorBindingEntity?>
 
     @Query("SELECT * FROM book_narrator_bindings WHERE bookId = :bookId AND active = 1 LIMIT 1")
     suspend fun getActiveNarratorBinding(bookId: String): BookNarratorBindingEntity?
@@ -159,8 +195,11 @@ interface StoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChapters(chapters: List<ChapterEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertCharacters(characters: List<StoryCharacterEntity>)
+
+    @Upsert
+    suspend fun insertChapterCharacterMentions(mentions: List<ChapterCharacterMentionEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRelations(relations: List<StoryRelationEntity>)
@@ -228,6 +267,64 @@ interface StoryDao {
     @Upsert
     suspend fun upsertMemory(memory: MemoryItemEntity)
 
+    @Upsert
+    suspend fun upsertCharacterMemoryEvidence(evidence: List<CharacterMemoryEvidenceEntity>)
+
+    @Query("SELECT * FROM character_memory_evidence WHERE memoryId = :memoryId AND characterId = :characterId")
+    suspend fun getCharacterMemoryEvidence(memoryId: String, characterId: String): CharacterMemoryEvidenceEntity?
+
+    @Query("""
+        SELECT m.* FROM memory_items m
+        JOIN character_memory_defaults d ON d.memoryId = m.id
+        WHERE d.characterId = :characterId AND m.bookId = :bookId
+          AND NOT EXISTS (
+              SELECT 1 FROM character_memory_evidence e
+              WHERE e.memoryId = m.id AND e.characterId = :characterId AND e.invalidatedAt IS NOT NULL
+          )
+          AND (
+              NOT EXISTS (
+                  SELECT 1 FROM character_memory_evidence e
+                  WHERE e.memoryId = m.id AND e.characterId = :characterId
+              )
+              OR COALESCE(
+                  (SELECT e.spoilerBoundaryChapterIndex FROM character_memory_evidence e WHERE e.memoryId = m.id AND e.characterId = :characterId),
+                  m.chapterEndIndex, m.chapterStartIndex
+              ) IS NULL
+              OR COALESCE(
+                  (SELECT e.spoilerBoundaryChapterIndex FROM character_memory_evidence e WHERE e.memoryId = m.id AND e.characterId = :characterId),
+                  m.chapterEndIndex, m.chapterStartIndex
+              ) <= :readingProgress
+          )
+        ORDER BY d.createdAt
+    """)
+    suspend fun getDefaultMemoriesForChat(bookId: String, characterId: String, readingProgress: Int): List<MemoryItemEntity>
+
+    @Query("""
+        SELECT m.* FROM memory_items m
+        JOIN session_memory_links s ON s.memoryId = m.id
+        WHERE s.sessionId = :sessionId AND m.bookId = :bookId
+          AND NOT EXISTS (
+              SELECT 1 FROM character_memory_evidence e
+              WHERE e.memoryId = m.id AND e.characterId = :characterId AND e.invalidatedAt IS NOT NULL
+          )
+          AND (
+              NOT EXISTS (
+                  SELECT 1 FROM character_memory_evidence e
+                  WHERE e.memoryId = m.id AND e.characterId = :characterId
+              )
+              OR COALESCE(
+                  (SELECT e.spoilerBoundaryChapterIndex FROM character_memory_evidence e WHERE e.memoryId = m.id AND e.characterId = :characterId),
+                  m.chapterEndIndex, m.chapterStartIndex
+              ) IS NULL
+              OR COALESCE(
+                  (SELECT e.spoilerBoundaryChapterIndex FROM character_memory_evidence e WHERE e.memoryId = m.id AND e.characterId = :characterId),
+                  m.chapterEndIndex, m.chapterStartIndex
+              ) <= :readingProgress
+          )
+        ORDER BY s.selectedAt
+    """)
+    suspend fun getSessionMemoriesForChat(bookId: String, characterId: String, sessionId: String, readingProgress: Int): List<MemoryItemEntity>
+
     @Insert
     suspend fun insertMemoryFts(memory: MemoryFtsEntity)
 
@@ -270,11 +367,33 @@ interface StoryDao {
     @Query("UPDATE chapters SET analysisStatus = :status WHERE id IN (:chapterIds)")
     suspend fun updateAnalysisStatus(chapterIds: List<String>, status: String)
 
+    @Query("UPDATE chapters SET analysisStatus = :status WHERE id IN (:chapterIds) AND analysisStatus = 'RUNNING'")
+    suspend fun updateRunningAnalysisStatus(chapterIds: List<String>, status: String)
+
     @Query("UPDATE books SET analysisCompleted = :completed WHERE id = :bookId")
     suspend fun updateAnalysisCompleted(bookId: String, completed: Int)
 
+    @Insert
+    suspend fun insertTaskRun(run: TaskRunEntity)
+
+    @Insert
+    suspend fun insertTaskEvent(event: TaskEventEntity)
+
+    @Query("UPDATE task_runs SET status = :status, finishedAt = :finishedAt WHERE id = :runId")
+    suspend fun finishTaskRun(runId: String, status: String, finishedAt: Long)
+
+    @Query("SELECT * FROM task_events ORDER BY createdAt DESC, id DESC")
+    fun observeTaskEvents(): Flow<List<TaskEventEntity>>
+
+    @Query("DELETE FROM task_events")
+    suspend fun clearTaskEvents()
+
+    @Query("DELETE FROM task_runs")
+    suspend fun clearTaskRuns()
+
     @Query("DELETE FROM books WHERE id = :bookId")
     suspend fun deleteBook(bookId: String)
+
 
     @Query("DELETE FROM relations WHERE bookId = :bookId")
     suspend fun deleteRelationsForBook(bookId: String)

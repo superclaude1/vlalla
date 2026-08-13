@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import org.json.JSONArray
 
 @Database(
     entities = [
@@ -16,6 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlotNodeEntity::class,
         ChatMessageEntity::class,
         MemoryItemEntity::class,
+        CharacterMemoryEvidenceEntity::class,
         MemoryFtsEntity::class,
         ChatSessionEntity::class,
         CharacterMemoryDefaultEntity::class,
@@ -26,9 +28,14 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CharacterVoiceBindingEntity::class,
         BookNarratorBindingEntity::class,
         TtsScriptEntity::class,
-        TtsScriptSegmentEntity::class
+        TtsScriptSegmentEntity::class,
+        ChapterCharacterMentionEntity::class,
+        TaskRunEntity::class,
+        TaskEventEntity::class,
+        LlmApiProfileEntity::class,
+        LlmModelEntity::class
     ],
-    version = 4,
+    version = 10,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -39,7 +46,38 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "story-brain.db"
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+            .addCallback(ANALYSIS_RECOVERY_CALLBACK)
+            .build()
+
+        internal val ANALYSIS_RECOVERY_CALLBACK = object : Callback() {
+            override fun onOpen(db: SupportSQLiteDatabase) {
+                super.onOpen(db)
+                db.beginTransaction()
+                try {
+                    db.execSQL(
+                        """UPDATE chapters SET analysisStatus = 'COMPLETED'
+                            WHERE analysisStatus = 'RUNNING' AND EXISTS (
+                                SELECT 1 FROM books
+                                WHERE books.id = chapters.bookId
+                                  AND chapters.chapterIndex < books.analysisCompleted
+                            )""".trimIndent()
+                    )
+                    db.execSQL(
+                        """UPDATE chapters SET analysisStatus = 'PENDING'
+                            WHERE analysisStatus = 'RUNNING'""".trimIndent()
+                    )
+                    db.execSQL(
+                        """UPDATE task_runs SET status = 'FAILED',
+                            finishedAt = COALESCE(finishedAt, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+                            WHERE taskType = 'ANALYSIS' AND status = 'RUNNING'""".trimIndent()
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+        }
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -157,6 +195,87 @@ abstract class AppDatabase : RoomDatabase() {
                         arrayOf("edge-default", row[0], row[2], row[1], row[3])
                     )
                 }
+            }
+        }
+
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `chapter_character_mentions` (`id` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `characterId` TEXT NOT NULL, `evidence` TEXT NOT NULL, `confidence` REAL NOT NULL, `sourceHash` TEXT NOT NULL, `analysisVersion` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`characterId`) REFERENCES `characters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chapter_character_mentions_chapterId` ON `chapter_character_mentions` (`chapterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chapter_character_mentions_characterId` ON `chapter_character_mentions` (`characterId`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_chapter_character_mentions_chapterId_characterId_sourceHash_analysisVersion` ON `chapter_character_mentions` (`chapterId`,`characterId`,`sourceHash`,`analysisVersion`)")
+            }
+        }
+
+        internal val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `task_runs` (`id` TEXT NOT NULL, `taskType` TEXT NOT NULL, `targetId` TEXT NOT NULL, `status` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `finishedAt` INTEGER, PRIMARY KEY(`id`))""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_runs_createdAt` ON `task_runs` (`createdAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_runs_taskType` ON `task_runs` (`taskType`)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `task_events` (`id` TEXT NOT NULL, `runId` TEXT NOT NULL, `taskType` TEXT NOT NULL, `targetId` TEXT NOT NULL, `eventType` TEXT NOT NULL, `stage` TEXT NOT NULL, `retryable` INTEGER NOT NULL, `statusCode` INTEGER, `attempt` INTEGER NOT NULL, `message` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`runId`) REFERENCES `task_runs`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_events_runId` ON `task_events` (`runId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_events_createdAt` ON `task_events` (`createdAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_task_events_eventType` ON `task_events` (`eventType`)")
+            }
+        }
+
+        internal val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `character_memory_evidence` (`memoryId` TEXT NOT NULL, `characterId` TEXT NOT NULL, `chapterStartIndex` INTEGER, `chapterEndIndex` INTEGER, `characterIdsJson` TEXT NOT NULL, `source` TEXT NOT NULL, `confidence` REAL NOT NULL, `invalidatedAt` INTEGER, `spoilerBoundaryChapterIndex` INTEGER, PRIMARY KEY(`memoryId`, `characterId`), FOREIGN KEY(`memoryId`) REFERENCES `memory_items`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`characterId`) REFERENCES `characters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_character_memory_evidence_memoryId` ON `character_memory_evidence` (`memoryId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_character_memory_evidence_characterId` ON `character_memory_evidence` (`characterId`)")
+                db.query("SELECT `id`,`chapterStartIndex`,`chapterEndIndex`,`characterIdsJson` FROM `memory_items`").use { cursor ->
+                    val idIndex = cursor.getColumnIndexOrThrow("id")
+                    val startIndex = cursor.getColumnIndexOrThrow("chapterStartIndex")
+                    val endIndex = cursor.getColumnIndexOrThrow("chapterEndIndex")
+                    val idsIndex = cursor.getColumnIndexOrThrow("characterIdsJson")
+                    while (cursor.moveToNext()) {
+                        val memoryId = cursor.getString(idIndex)
+                        val start = if (cursor.isNull(startIndex)) null else cursor.getInt(startIndex)
+                        val end = if (cursor.isNull(endIndex)) null else cursor.getInt(endIndex)
+                        val characterIdsJson = cursor.getString(idsIndex)
+                        runCatching { JSONArray(characterIdsJson) }.getOrNull()?.let { ids ->
+                            for (index in 0 until ids.length()) {
+                                val characterId = ids.optString(index).trim()
+                                if (characterId.isBlank()) continue
+                                db.execSQL(
+                                    "INSERT OR IGNORE INTO `character_memory_evidence` (`memoryId`,`characterId`,`chapterStartIndex`,`chapterEndIndex`,`characterIdsJson`,`source`,`confidence`,`invalidatedAt`,`spoilerBoundaryChapterIndex`) VALUES (?,?,?,?,?,'LEGACY_MEMORY_ITEM',0.5,NULL,?)",
+                                    arrayOf(memoryId, characterId, start, end, characterIdsJson, end ?: start)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        internal val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `llm_api_profiles` (`id` TEXT NOT NULL, `displayName` TEXT NOT NULL, `baseUrl` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_llm_api_profiles_updatedAt` ON `llm_api_profiles` (`updatedAt`)")
+                db.execSQL("""CREATE TABLE IF NOT EXISTS `llm_models` (`apiProfileId` TEXT NOT NULL, `modelId` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`apiProfileId`, `modelId`), FOREIGN KEY(`apiProfileId`) REFERENCES `llm_api_profiles`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_llm_models_apiProfileId` ON `llm_models` (`apiProfileId`)")
+            }
+        }
+
+        internal val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `promptTokens` INTEGER")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `completionTokens` INTEGER")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `totalTokens` INTEGER")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `usageQuality` TEXT")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `requestId` TEXT")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `responseModel` TEXT")
+            }
+        }
+
+        internal val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `llm_api_profiles` ADD COLUMN `selectedModel` TEXT NOT NULL DEFAULT ''")
             }
         }
     }

@@ -7,6 +7,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.storybrain.app.data.AppDatabase
 import com.storybrain.app.data.BookEntity
 import com.storybrain.app.data.ChatMessageEntity
+import com.storybrain.app.data.CharacterMemoryDefaultEntity
+import com.storybrain.app.data.CharacterMemoryEvidenceEntity
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.MemorySearch
 import com.storybrain.app.data.PlotNodeEntity
@@ -53,7 +55,7 @@ class CharacterChatServiceIntegrationTest {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val repository = StoryRepository(database)
         val dao = database.storyDao()
-        dao.insertBook(BookEntity("book", "测试小说", "test.txt", 1, 10, 1_000, analysisCompleted = 5))
+        dao.insertBook(BookEntity("book", "测试小说", "test.txt", 1, 10, 1_000, currentChapterIndex = 4, analysisCompleted = 5))
         dao.insertCharacters(
             listOf(
                 StoryCharacterEntity(
@@ -116,7 +118,7 @@ class CharacterChatServiceIntegrationTest {
                     """{"choices":[{"message":{"role":"assistant","content":"我只记得你允许我记得的事。"}}]}"""
                 )
         )
-        val settings = LlmSettingsStore(context)
+        val settings = LlmSettingsStore(context, repository)
         settings.save(server.url("/v1").toString(), "mock-model", "test-key")
         val reply = CharacterChatService(repository, settings).send(
             "book", "character", current.id, "请结合推荐关键词回答"
@@ -173,7 +175,7 @@ class CharacterChatServiceIntegrationTest {
         )
         dao.insertBook(BookEntity("book", "索引测试", "test.txt", 1, 3, 300))
         repeat(2) {
-            repository.saveAnalysisDelta("book", 3, listOf(character), listOf(relation), listOf(plot))
+            repository.saveAnalysisDelta("book", 3, emptyList(), listOf(character), listOf(relation), listOf(plot))
         }
 
         val automaticMemories = dao.getMemories("book")
@@ -189,5 +191,45 @@ class CharacterChatServiceIntegrationTest {
         assertTrue(repository.memoriesWithSelection("book", "character", session.id, 3, "星火").any { it.id == note.id })
         repository.deleteMemory(note.id)
         assertFalse(repository.memoriesWithSelection("book", "character", session.id, 3, "星火").any { it.id == note.id })
+    }
+
+    @Test
+    fun characterChatMemoryFilterUsesReadingProgressAndKeepsUserMemoryTraceable() = runBlocking {
+        val repository = StoryRepository(database)
+        val dao = database.storyDao()
+        dao.insertBook(BookEntity("book", "阅读进度测试", "test.txt", 1, 10, 1_000, currentChapterIndex = 1, analysisCompleted = 5))
+        dao.insertCharacters(
+            listOf(StoryCharacterEntity("character", "book", "林清", firstChapterIndex = 0, lastChapterIndex = 9))
+        )
+        val session = repository.createSession("book", "character")
+        val visible = repository.createMemory(
+            "book", MemoryType.NOTE, "已读记忆", "VISIBLE_MEMORY", chapterStartIndex = 1, characterIds = listOf("character")
+        )
+        val future = repository.createMemory(
+            "book", MemoryType.NOTE, "未来记忆", "FUTURE_MEMORY", chapterStartIndex = 2, characterIds = listOf("character")
+        )
+        repository.setDefaultMemory("character", visible.id, true)
+        // Simulate an already-selected legacy/stale link; the chat boundary must still filter it.
+        dao.insertDefaultMemory(CharacterMemoryDefaultEntity("character", future.id, 1))
+        repository.saveCharacterMemoryEvidence(
+            CharacterMemoryEvidenceEntity(
+                memoryId = future.id,
+                characterId = "character",
+                chapterStartIndex = 2,
+                chapterEndIndex = 2,
+                characterIdsJson = "[\"character\"]",
+                source = "USER",
+                confidence = 1f,
+                spoilerBoundaryChapterIndex = 2
+            )
+        )
+
+        val groups = repository.getCharacterMemoriesForChat("book", "character", session.id, 1)
+
+        assertTrue(groups.defaultMemories.any { it.id == visible.id })
+        assertFalse(groups.defaultMemories.any { it.id == future.id })
+        val evidence = dao.getCharacterMemoryEvidence(visible.id, "character")
+        assertEquals("USER", evidence?.source)
+        assertEquals(1, evidence?.spoilerBoundaryChapterIndex)
     }
 }

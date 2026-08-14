@@ -21,6 +21,10 @@ import org.junit.Test
 class OpenAiCompatibleClientTest {
     @Test
     fun cancellingSuspendCompletionCancelsActiveOkHttpCall() = runBlocking {
+        // The request URL below is pinned to the "localhost" hostname so the
+        // self-signed certificate's DNS SAN always matches. MockWebServer's own
+        // url() can expose 127.0.0.1 or the machine name depending on the OS,
+        // which makes hostname verification fail on some hosts.
         val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
         val serverCertificates = HandshakeCertificates.Builder().heldCertificate(certificate).build()
         val clientCertificates = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
@@ -39,7 +43,7 @@ class OpenAiCompatibleClientTest {
         try {
             val request = launch(Dispatchers.IO) {
                 api.chatCompletionResult(
-                    baseUrl = server.url("/v1").toString(),
+                    baseUrl = "https://localhost:${server.port}/v1",
                     apiKey = "test-key",
                     model = "test-model",
                     messages = listOf(LlmMessage("user", "hello"))

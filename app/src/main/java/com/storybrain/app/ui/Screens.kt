@@ -358,31 +358,37 @@ fun ImportPreviewScreen(
                     OutlinedButton(onClick = onBack) { Text("返回书架") }
                 }
             }
-            state.novel != null -> LazyColumn(
-                Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, 100.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                item {
-                    OutlinedTextField(
-                        value = state.title,
-                        onValueChange = viewModel::updateImportTitle,
-                        label = { Text("书名") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text("识别到 ${state.novel!!.chapters.size} 章", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("请快速检查章节边界，确认后将保存在本机。", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                }
-                itemsIndexed(state.novel!!.chapters) { index, chapter ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("${index + 1}", color = MaterialTheme.colorScheme.primary, modifier = Modifier.width(38.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(chapter.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                                Text("${chapter.content.length} 字", style = MaterialTheme.typography.labelSmall)
+            state.novel != null -> {
+                // Capture the non-null novel in a local val: the LazyList interval
+                // lambdas below are re-invoked on snapshot invalidation, and reading
+                // state.novel!! there crashes when a reselection resets state to loading.
+                val novel = state.novel!!
+                LazyColumn(
+                    Modifier.fillMaxSize().padding(padding),
+                    contentPadding = PaddingValues(16.dp, 12.dp, 16.dp, 100.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item {
+                        OutlinedTextField(
+                            value = state.title,
+                            onValueChange = viewModel::updateImportTitle,
+                            label = { Text("书名") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text("识别到 ${novel.chapters.size} 章", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text("请快速检查章节边界，确认后将保存在本机。", style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    itemsIndexed(novel.chapters) { index, chapter ->
+                        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+                            Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${index + 1}", color = MaterialTheme.colorScheme.primary, modifier = Modifier.width(38.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(chapter.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                                    Text("${chapter.content.length} 字", style = MaterialTheme.typography.labelSmall)
+                                }
                             }
                         }
                     }

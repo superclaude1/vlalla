@@ -22,7 +22,8 @@ class LibraryImportActionContractTest {
     @Test
     fun importPreviewConnectsTitlePreviewCancelReselectAndConfirmToRealActions() {
         assertTrue(screens.contains("onValueChange = viewModel::updateImportTitle"))
-        assertTrue(screens.contains("itemsIndexed(state.novel!!.chapters)"))
+        assertTrue(screens.contains("val novel = state.novel!!"))
+        assertTrue(screens.contains("itemsIndexed(novel.chapters)"))
         assertTrue(screens.contains("reselectLauncher.launch(TXT_MIME_TYPES)"))
         assertTrue(screens.contains("viewModel.loadNovel(uri)"))
         assertTrue(screens.contains("viewModel.confirmImport(onImported)"))

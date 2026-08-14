@@ -29,6 +29,10 @@ class BlockSpeakController(
 ) {
     private var player: MediaPlayer? = null
 
+    /** 引擎健康记忆：网络失败后，后续点读跳过主引擎超时等待直接降级。 */
+    @Volatile
+    private var networkFallbackEngaged = false
+
     suspend fun speak(
         bookId: String,
         speaker: String?,
@@ -64,6 +68,18 @@ class BlockSpeakController(
         output: File
     ): TtsAudioArtifact {
         val kind = TtsProviderKind.valueOf(resolved.profile.kind)
+        if (networkFallbackEngaged && kind != TtsProviderKind.ANDROID_SYSTEM) {
+            return synthesizeCancellably(
+                androidSystemProvider,
+                TtsSynthesisRequest(
+                    text = text,
+                    voice = VoiceResolver.ANDROID_SYSTEM_VOICE_ID,
+                    model = "",
+                    profileId = com.storybrain.app.data.TtsProfileIds.ANDROID_SYSTEM
+                ),
+                output
+            )
+        }
         val primary = try {
             synthesizeWithRetry(providerFor(kind, resolved), resolved, text, output)
         } catch (primaryError: Throwable) {
@@ -73,6 +89,7 @@ class BlockSpeakController(
                 (primaryError is EdgeTtsException && primaryError.retryable)
             if (!networkFailure || kind == TtsProviderKind.ANDROID_SYSTEM) throw primaryError
             // 网络失败降级到 Android 系统 TTS（离线可用）
+            networkFallbackEngaged = true
             synthesizeCancellably(
                 androidSystemProvider,
                 TtsSynthesisRequest(

@@ -435,4 +435,7 @@ interface StoryDao {
 
     @Query("DELETE FROM reading_marks WHERE id = :markId")
     suspend fun deleteReadingMark(markId: String)
+
+    @Query("UPDATE books SET coverPath = :path WHERE id = :bookId")
+    suspend fun updateBookCover(bookId: String, path: String)
 }

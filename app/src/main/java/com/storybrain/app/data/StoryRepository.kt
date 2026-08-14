@@ -701,6 +701,8 @@ class StoryRepository(private val database: AppDatabase) {
 
     suspend fun deleteReadingMark(markId: String) = dao.deleteReadingMark(markId)
 
+    suspend fun updateBookCover(bookId: String, path: String) = dao.updateBookCover(bookId, path)
+
     private fun stableMemoryId(sourceKey: String): String = UUID.nameUUIDFromBytes(
         sourceKey.toByteArray(StandardCharsets.UTF_8)
     ).toString()

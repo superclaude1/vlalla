@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.GraphicEq
@@ -86,6 +87,7 @@ import com.storybrain.app.data.TaskStatus
 fun BookHubScreen(bookId: String, viewModel: AppViewModel, onBack: () -> Unit, onRead: (String) -> Unit, onOpenChapters: () -> Unit, onOpenStory: () -> Unit, onOpenAudio: () -> Unit) {
     val book by viewModel.book(bookId).collectAsStateWithLifecycle(initialValue = null)
     val chapters by viewModel.chapters(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val coverError by viewModel.coverError.collectAsStateWithLifecycle()
     var moreMenuExpanded by rememberSaveable { mutableStateOf(false) }
     var confirmDelete by rememberSaveable { mutableStateOf(false) }
     var deleting by rememberSaveable { mutableStateOf(false) }
@@ -133,6 +135,14 @@ fun BookHubScreen(bookId: String, viewModel: AppViewModel, onBack: () -> Unit, o
                     IconButton({ moreMenuExpanded = true }) { Icon(Icons.Rounded.MoreVert, "更多") }
                     DropdownMenu(moreMenuExpanded, { moreMenuExpanded = false }) {
                         DropdownMenuItem(
+                            text = { Text("生成封面") },
+                            leadingIcon = { Icon(Icons.Rounded.Image, null) },
+                            onClick = {
+                                moreMenuExpanded = false
+                                book?.let { viewModel.generateBookCover(bookId, it.title, regenerate = true) }
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("删除小说") },
                             leadingIcon = { Icon(Icons.Rounded.Delete, null) },
                             onClick = { moreMenuExpanded = false; deleteError = null; confirmDelete = true }
@@ -168,6 +178,13 @@ fun BookHubScreen(bookId: String, viewModel: AppViewModel, onBack: () -> Unit, o
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                coverError?.let { error ->
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {

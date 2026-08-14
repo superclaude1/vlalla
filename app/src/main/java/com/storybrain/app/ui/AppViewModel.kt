@@ -29,6 +29,7 @@ import com.storybrain.app.reader.ReaderPosition
 import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.data.ReadingPositionEntity
+import com.storybrain.app.data.PollinationsCoverGenerator
 import com.storybrain.app.data.ReadingMarkEntity
 import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReaderTheme
@@ -318,6 +319,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess { id ->
                     importInProgress = false
                     _importState.value = ImportUiState()
+                    // 导入成功后自动生成封面（稳定 seed，后台执行不阻塞）
+                    generateBookCover(id, state.title, regenerate = false)
                     onComplete(id)
                 }
                 .onFailure { importInProgress = false; _importState.value = state.copy(loading = false, error = it.message) }
@@ -458,6 +461,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearBlockSpeakError() {
         _blockSpeakError.value = null
+    }
+
+    // ---- 书籍封面（Pollinations.ai）----
+
+    private val coverGenerator by lazy { PollinationsCoverGenerator(application) }
+
+    private val _coverError = MutableStateFlow<String?>(null)
+    val coverError: StateFlow<String?> = _coverError
+
+    /** 生成/重新生成书籍封面。默认 seed 由 bookId 稳定派生；regenerate 换随机 seed。 */
+    fun generateBookCover(bookId: String, title: String, regenerate: Boolean = false) {
+        val seed = if (regenerate) (System.currentTimeMillis() % 100_000).toInt()
+        else PollinationsCoverGenerator.stableSeed(bookId)
+        coverGenerator.generate(bookId, title, seed) { result ->
+            result.onSuccess { file ->
+                viewModelScope.launch { repository.updateBookCover(bookId, file.absolutePath) }
+            }
+            result.onFailure { error ->
+                viewModelScope.launch { _coverError.value = error.message ?: "封面生成失败" }
+            }
+        }
     }
 
     fun readerPosition(

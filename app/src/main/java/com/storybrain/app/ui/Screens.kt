@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Bookmarks
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -111,6 +112,8 @@ import com.storybrain.app.reader.TextMeasurerLineMeasurer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.geometry.Offset
@@ -307,12 +310,26 @@ private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
                 .background(MaterialTheme.colorScheme.primaryContainer),
             contentAlignment = Alignment.Center
         ) {
-            androidx.compose.foundation.Image(
-                painter = painterResource(R.drawable.story_brain_cover),
-                contentDescription = "${book.title} 封面",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
+            val coverBitmap = remember(book.coverPath) {
+                book.coverPath?.let { path ->
+                    runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+                }
+            }
+            if (coverBitmap != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = coverBitmap.asImageBitmap(),
+                    contentDescription = "${book.title} 封面",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.story_brain_cover),
+                    contentDescription = "${book.title} 封面",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -476,6 +493,14 @@ fun BookScreen(
                     Box {
                         IconButton(onClick = { moreMenuExpanded = true }) { Icon(Icons.Rounded.MoreVert, "更多") }
                         DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = { moreMenuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("生成封面") },
+                                leadingIcon = { Icon(Icons.Rounded.Image, null) },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    book?.let { viewModel.generateBookCover(bookId, it.title, regenerate = true) }
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("删除小说") },
                                 leadingIcon = { Icon(Icons.Rounded.Delete, null) },

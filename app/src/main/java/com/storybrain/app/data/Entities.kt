@@ -41,7 +41,8 @@ data class BookEntity(
     val chapterCount: Int,
     val totalChars: Long,
     val currentChapterIndex: Int = 0,
-    val analysisCompleted: Int = 0
+    val analysisCompleted: Int = 0,
+    val coverPath: String? = null
 )
 
 @Entity(

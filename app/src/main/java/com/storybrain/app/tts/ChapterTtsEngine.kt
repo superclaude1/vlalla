@@ -137,6 +137,7 @@ class ChapterTtsEngine(
         val manifestSegments = JSONArray()
         return runCatching {
             // 逐块并行合成（窗口 2）：单段失败记录后继续，不中断整章。
+            val health = EngineHealth()
             val outcomes = coroutineScope {
                 val semaphore = Semaphore(2)
                 jobs.mapIndexed { index, job ->
@@ -150,6 +151,7 @@ class ChapterTtsEngine(
                                 staging = staging,
                                 directory = directory,
                                 scriptId = scriptId,
+                                health = health,
                                 onProgress = onProgress,
                                 onStage = onStage
                             )
@@ -240,6 +242,14 @@ class ChapterTtsEngine(
         val error: String? = null
     )
 
+    /**
+     * 引擎健康记忆：某引擎出现网络类失败后，本章剩余分段跳过主引擎直接降级，
+     * 避免每段都白等一轮超时。
+     */
+    private class EngineHealth {
+        @Volatile var networkFailed = false
+    }
+
     /** 单段处理：缓存命中/合成/落盘/记录；失败只影响本段。 */
     private suspend fun processJob(
         job: SpeechJob,
@@ -249,6 +259,7 @@ class ChapterTtsEngine(
         staging: File,
         directory: File,
         scriptId: String,
+        health: EngineHealth,
         onProgress: (completed: Int, total: Int) -> Unit,
         onStage: (String) -> Unit
     ): SegmentOutcome {
@@ -256,7 +267,7 @@ class ChapterTtsEngine(
         onStage("正在使用 ${job.resolved.profile.displayName} 生成 ${index + 1}/$total 段")
         return try {
             val cachedArtifact = findCachedArtifact(cache, job.cacheKey)
-            val artifact = cachedArtifact ?: synthesizeWithRetry(job, File(cache, "${job.cacheKey}.audio"))
+            val artifact = cachedArtifact ?: synthesizeWithRetry(job, File(cache, "${job.cacheKey}.audio"), health)
             val normalizedArtifact = normalizeCachedArtifact(artifact, job.cacheKey, cache)
             val fileName = "%04d.${normalizedArtifact.fileExtension()}".format(index)
             val stagingFile = File(staging, fileName)
@@ -277,9 +288,9 @@ class ChapterTtsEngine(
         }
     }
 
-    private suspend fun synthesizeWithRetry(job: SpeechJob, output: File): TtsAudioArtifact {
+    private suspend fun synthesizeWithRetry(job: SpeechJob, output: File, health: EngineHealth): TtsAudioArtifact {
         return try {
-            synthesizeWithPrimaryProvider(job, output)
+            synthesizeWithPrimaryProvider(job, output, health)
         } catch (primary: Throwable) {
             if (primary is CancellationException) throw primary
             // 引擎降级：仅网络类失败时回退到 Android 系统 TTS（离线可用），
@@ -289,6 +300,7 @@ class ChapterTtsEngine(
                 (primary is EdgeTtsException && primary.retryable)
             if (!networkFailure) throw primary
             if (TtsProviderKind.valueOf(job.resolved.profile.kind) == TtsProviderKind.ANDROID_SYSTEM) throw primary
+            health.networkFailed = true
             val fallbackRequest = TtsSynthesisRequest(
                 text = job.text,
                 voice = VoiceResolver.ANDROID_SYSTEM_VOICE_ID,
@@ -302,7 +314,15 @@ class ChapterTtsEngine(
         }
     }
 
-    private suspend fun synthesizeWithPrimaryProvider(job: SpeechJob, output: File): TtsAudioArtifact {
+    private suspend fun synthesizeWithPrimaryProvider(
+        job: SpeechJob,
+        output: File,
+        health: EngineHealth
+    ): TtsAudioArtifact {
+        // 引擎已被判网络故障：跳过主引擎的超时等待，直接走降级。
+        if (health.networkFailed && TtsProviderKind.valueOf(job.resolved.profile.kind) != TtsProviderKind.ANDROID_SYSTEM) {
+            throw IOException("引擎不可用，已降级")
+        }
         val provider = provider(job.resolved)
         val request = TtsSynthesisRequest(
             text = job.text,

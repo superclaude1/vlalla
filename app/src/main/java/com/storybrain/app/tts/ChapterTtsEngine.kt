@@ -4,6 +4,7 @@ import android.content.Context
 import com.storybrain.app.data.StoryCharacterEntity
 import com.storybrain.app.data.StoryRepository
 import com.storybrain.app.data.TaskStatus
+import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsProviderKind
 import com.storybrain.app.data.TtsScriptEntity
 import com.storybrain.app.data.TtsScriptSegmentEntity
@@ -12,12 +13,18 @@ import com.storybrain.app.reader.TextToChatParser
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.TtsSettingsStore
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -129,22 +136,45 @@ class ChapterTtsEngine(
         repository.updateTtsStatus(chapterId, TaskStatus.RUNNING)
         val manifestSegments = JSONArray()
         return runCatching {
+            // 逐块并行合成（窗口 2）：单段失败记录后继续，不中断整章。
+            val outcomes = coroutineScope {
+                val semaphore = Semaphore(2)
+                jobs.mapIndexed { index, job ->
+                    async {
+                        semaphore.withPermit {
+                            processJob(
+                                job = job,
+                                index = index,
+                                total = jobs.size,
+                                cache = cache,
+                                staging = staging,
+                                directory = directory,
+                                scriptId = scriptId,
+                                onProgress = onProgress,
+                                onStage = onStage
+                            )
+                        }
+                    }
+                }.awaitAll()
+            }
+            val succeeded = outcomes.count { it.success }
+            if (succeeded == 0) error("所有分段配音失败，请检查配音服务配置后重试")
             jobs.forEachIndexed { index, job ->
-                currentCoroutineContext().ensureActive()
-                onStage("正在使用 ${job.resolved.profile.displayName} 生成 ${index + 1}/${jobs.size} 段")
-                val cachedArtifact = findCachedArtifact(cache, job.cacheKey)
-                val artifact = cachedArtifact ?: synthesizeWithRetry(job, File(cache, "${job.cacheKey}.audio"))
-                val normalizedArtifact = normalizeCachedArtifact(artifact, job.cacheKey, cache)
-                val fileName = "%04d.${normalizedArtifact.fileExtension()}".format(index)
-                val stagingFile = File(staging, fileName)
-                normalizedArtifact.file.copyTo(stagingFile, overwrite = true)
-                val row = job.toEntity(
-                    scriptId, TaskStatus.COMPLETED,
-                    File(directory, fileName).absolutePath, null, System.currentTimeMillis()
-                )
-                repository.updateTtsScriptSegments(listOf(row))
-                manifestSegments.put(job.manifest(File(directory, fileName), normalizedArtifact))
-                onProgress(index + 1, jobs.size)
+                val outcome = outcomes[index]
+                if (outcome.success && outcome.artifact != null) {
+                    val fileName = "%04d.${outcome.artifact.fileExtension()}".format(index)
+                    manifestSegments.put(job.manifest(File(directory, fileName), outcome.artifact))
+                } else {
+                    // 失败段 path 置空：播放器自动跳过
+                    manifestSegments.put(
+                        JSONObject()
+                            .put("index", index)
+                            .put("blockIndex", job.blockIndex)
+                            .put("speaker", job.speaker)
+                            .put("error", outcome.error ?: "配音失败")
+                            .put("path", "")
+                    )
+                }
             }
             File(staging, "manifest.json").writeText(
                 JSONObject()
@@ -169,9 +199,16 @@ class ChapterTtsEngine(
             repository.updateTtsResult(chapterId, TaskStatus.COMPLETED, manifest.absolutePath)
             repository.saveTtsScript(
                 TtsScriptEntity(scriptId, bookId, chapterId, sourceHash, llmModelIdentity, TtsDirectingService.PROMPT_VERSION, TaskStatus.COMPLETED.name, previousScript?.createdAt ?: now, System.currentTimeMillis()),
-                jobs.mapIndexed { index, job -> job.toEntity(scriptId, TaskStatus.COMPLETED, manifestSegments.getJSONObject(index).getString("path"), null, System.currentTimeMillis()) }
+                jobs.mapIndexed { index, job ->
+                    val outcome = outcomes[index]
+                    if (outcome.success) {
+                        job.toEntity(scriptId, TaskStatus.COMPLETED, manifestSegments.getJSONObject(index).optString("path").takeIf(String::isNotBlank), null, System.currentTimeMillis())
+                    } else {
+                        job.toEntity(scriptId, TaskStatus.FAILED, null, outcome.error, System.currentTimeMillis())
+                    }
+                }
             )
-            TtsGenerationResult(manifest.absolutePath, jobs.size)
+            TtsGenerationResult(manifest.absolutePath, succeeded)
         }.getOrElse { cause ->
             withContext(NonCancellable) {
                 staging.deleteRecursively()
@@ -197,7 +234,75 @@ class ChapterTtsEngine(
         }
     }
 
+    private data class SegmentOutcome(
+        val success: Boolean,
+        val artifact: TtsAudioArtifact? = null,
+        val error: String? = null
+    )
+
+    /** 单段处理：缓存命中/合成/落盘/记录；失败只影响本段。 */
+    private suspend fun processJob(
+        job: SpeechJob,
+        index: Int,
+        total: Int,
+        cache: File,
+        staging: File,
+        directory: File,
+        scriptId: String,
+        onProgress: (completed: Int, total: Int) -> Unit,
+        onStage: (String) -> Unit
+    ): SegmentOutcome {
+        currentCoroutineContext().ensureActive()
+        onStage("正在使用 ${job.resolved.profile.displayName} 生成 ${index + 1}/$total 段")
+        return try {
+            val cachedArtifact = findCachedArtifact(cache, job.cacheKey)
+            val artifact = cachedArtifact ?: synthesizeWithRetry(job, File(cache, "${job.cacheKey}.audio"))
+            val normalizedArtifact = normalizeCachedArtifact(artifact, job.cacheKey, cache)
+            val fileName = "%04d.${normalizedArtifact.fileExtension()}".format(index)
+            val stagingFile = File(staging, fileName)
+            normalizedArtifact.file.copyTo(stagingFile, overwrite = true)
+            val row = job.toEntity(
+                scriptId, TaskStatus.COMPLETED,
+                File(directory, fileName).absolutePath, null, System.currentTimeMillis()
+            )
+            repository.updateTtsScriptSegments(listOf(row))
+            onProgress(index + 1, total)
+            SegmentOutcome(success = true, artifact = normalizedArtifact)
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            val row = job.toEntity(scriptId, TaskStatus.FAILED, null, error.message, System.currentTimeMillis())
+            runCatching { repository.updateTtsScriptSegments(listOf(row)) }
+            onProgress(index + 1, total)
+            SegmentOutcome(success = false, error = error.message ?: "配音失败")
+        }
+    }
+
     private suspend fun synthesizeWithRetry(job: SpeechJob, output: File): TtsAudioArtifact {
+        return try {
+            synthesizeWithPrimaryProvider(job, output)
+        } catch (primary: Throwable) {
+            if (primary is CancellationException) throw primary
+            // 引擎降级：仅网络类失败时回退到 Android 系统 TTS（离线可用），
+            // 配置类错误（缺 Key/鉴权）保持原样提示，避免掩盖问题。
+            val networkFailure = primary is IOException ||
+                (primary is TtsProviderException && primary.retryable) ||
+                (primary is EdgeTtsException && primary.retryable)
+            if (!networkFailure) throw primary
+            if (TtsProviderKind.valueOf(job.resolved.profile.kind) == TtsProviderKind.ANDROID_SYSTEM) throw primary
+            val fallbackRequest = TtsSynthesisRequest(
+                text = job.text,
+                voice = VoiceResolver.ANDROID_SYSTEM_VOICE_ID,
+                model = "",
+                profileId = TtsProfileIds.ANDROID_SYSTEM,
+                directives = job.directives,
+                supportsInstructions = false,
+                idempotencyKey = job.cacheKey
+            )
+            synthesizeCancellably(androidSystemProvider, fallbackRequest, output)
+        }
+    }
+
+    private suspend fun synthesizeWithPrimaryProvider(job: SpeechJob, output: File): TtsAudioArtifact {
         val provider = provider(job.resolved)
         val request = TtsSynthesisRequest(
             text = job.text,

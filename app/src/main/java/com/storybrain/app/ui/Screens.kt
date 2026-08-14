@@ -660,6 +660,8 @@ fun ReaderScreen(
     val memoryAction by viewModel.memoryActionState.collectAsStateWithLifecycle()
     val readerMode by viewModel.readerMode.collectAsStateWithLifecycle()
     val readerPreferences by viewModel.readerPreferences.collectAsStateWithLifecycle()
+    val blockSpeak by viewModel.blockSpeak.collectAsStateWithLifecycle()
+    val blockSpeakError by viewModel.blockSpeakError.collectAsStateWithLifecycle()
     var pendingMemory by remember { mutableStateOf<PendingReadingMemory?>(null) }
     var showMoreSheet by rememberSaveable { mutableStateOf(false) }
     var showBookmarksSheet by rememberSaveable { mutableStateOf(false) }
@@ -1054,6 +1056,20 @@ fun ReaderScreen(
                             )
                         }
                     }
+                    blockSpeakError?.let { error ->
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                error,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
                     VerticalPager(
                         state = pageState,
                         modifier = Modifier.fillMaxSize()
@@ -1072,16 +1088,29 @@ fun ReaderScreen(
                                     is ReadingBlock.Dialogue -> DialogueBubble(
                                         block = block.copy(text = segmentText),
                                         fontSizeSp = readerPreferences.fontSizeSp,
-                                        lineHeightSp = readerPreferences.lineHeightSp
-                                    ) {
-                                        pendingMemory = PendingReadingMemory(
-                                            title = "${block.speaker}的原文对白",
-                                            content = block.text,
-                                            characterId = chapterMentionCharacters.firstOrNull { it.canonicalName == block.speaker }?.id
-                                                ?: characters.firstOrNull { it.canonicalName == block.speaker }?.id,
-                                            chapterIndex = currentChapter?.chapterIndex
-                                        )
-                                    }
+                                        lineHeightSp = readerPreferences.lineHeightSp,
+                                        onLongClick = {
+                                            pendingMemory = PendingReadingMemory(
+                                                title = "${block.speaker}的原文对白",
+                                                content = block.text,
+                                                characterId = chapterMentionCharacters.firstOrNull { it.canonicalName == block.speaker }?.id
+                                                    ?: characters.firstOrNull { it.canonicalName == block.speaker }?.id,
+                                                chapterIndex = currentChapter?.chapterIndex
+                                            )
+                                        },
+                                        onClick = {
+                                            viewModel.speakDialogueBlock(
+                                                bookId = bookId,
+                                                chapterId = currentChapter?.id.orEmpty(),
+                                                blockIndex = groupBlockIndex,
+                                                speaker = block.speaker,
+                                                text = block.text
+                                            )
+                                        },
+                                        isSpeaking = blockSpeak?.playing == true &&
+                                            blockSpeak?.chapterId == currentChapter?.id &&
+                                            blockSpeak?.blockIndex == groupBlockIndex
+                                    )
                                     else -> Text(
                                         text = segmentText,
                                         modifier = Modifier.fillMaxWidth().combinedClickable(
@@ -1115,7 +1144,9 @@ private fun DialogueBubble(
     block: ReadingBlock.Dialogue,
     fontSizeSp: Int,
     lineHeightSp: Int,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onClick: () -> Unit = {},
+    isSpeaking: Boolean = false
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Box(
@@ -1127,9 +1158,9 @@ private fun DialogueBubble(
             Text(block.speaker, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(3.dp))
             Surface(
-                modifier = Modifier.combinedClickable(onClick = {}, onLongClick = onLongClick),
+                modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
                 shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
-                color = MaterialTheme.colorScheme.surface
+                color = if (isSpeaking) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
             ) {
                 Text(
                     block.text,

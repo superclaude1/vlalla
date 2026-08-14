@@ -53,15 +53,56 @@ class VoiceResolver(
                 .thenBy { stableTie(character?.id ?: bookId, it.voiceId) }
         )
         if (selected == null) {
-            val label = when (TtsProviderKind.valueOf(profile.kind)) {
-                TtsProviderKind.FISH_AUDIO -> "Fish Audio"
-                TtsProviderKind.OPENAI_COMPATIBLE -> "兼容 TTS"
-                TtsProviderKind.EDGE -> "Edge TTS"
-                TtsProviderKind.ANDROID_SYSTEM -> "Android 系统 TTS"
-            }
-            error("$label 尚未配置${if (character == null) "旁白" else "角色"}音色池")
+            // 音色池为空时不再报错：按性别落到引擎内置默认音色（至少男女各一）。
+            return builtInFallback(profile, targetRole, character, speaker)
         }
         return ResolvedTtsVoice(profile, selected.voiceId, selected.voiceName, false)
+    }
+
+    /**
+     * 音色池兜底：本引擎无可用音色时，先试 Edge 内置默认音色（晓晓/云希），
+     * 最后落到 Android 系统 TTS（离线可用），保证男女角色始终有声音。
+     */
+    private suspend fun builtInFallback(
+        profile: TtsProviderProfileEntity,
+        targetRole: TtsVoiceRole,
+        character: StoryCharacterEntity?,
+        speaker: String?
+    ): ResolvedTtsVoice {
+        val kind = TtsProviderKind.valueOf(profile.kind)
+        when (kind) {
+            TtsProviderKind.EDGE -> {
+                val voice = if (targetRole == TtsVoiceRole.FEMALE || character?.gender == "FEMALE")
+                    EDGE_FEMALE else EDGE_MALE
+                return ResolvedTtsVoice(profile, voice.first, voice.second, false)
+            }
+
+            TtsProviderKind.ANDROID_SYSTEM -> return ResolvedTtsVoice(
+                profile, ANDROID_SYSTEM_VOICE_ID, "系统默认", false
+            )
+
+            TtsProviderKind.FISH_AUDIO, TtsProviderKind.OPENAI_COMPATIBLE -> {
+                // 第三方引擎无通用默认音色：降级到 Edge 内置默认（edge-default 总是预置）。
+                repository.getTtsProfile(TtsProfileIds.EDGE)?.let { edge ->
+                    val voice = if (targetRole == TtsVoiceRole.FEMALE || character?.gender == "FEMALE")
+                        EDGE_FEMALE else EDGE_MALE
+                    return ResolvedTtsVoice(edge, voice.first, voice.second, false)
+                }
+                val label = when (kind) {
+                    TtsProviderKind.FISH_AUDIO -> "Fish Audio"
+                    TtsProviderKind.OPENAI_COMPATIBLE -> "兼容 TTS"
+                    else -> "配音"
+                }
+                error("$label 尚未配置${if (character == null) "旁白" else "角色"}音色，请先在设置中添加音色或为角色绑定音色")
+            }
+        }
+    }
+
+    companion object {
+        /** Edge TTS 内置默认音色（男女）。 */
+        private val EDGE_FEMALE = "zh-CN-XiaoxiaoNeural" to "晓晓"
+        private val EDGE_MALE = "zh-CN-YunxiNeural" to "云希"
+        const val ANDROID_SYSTEM_VOICE_ID = "system-default"
     }
 
     private fun score(character: StoryCharacterEntity?, tagsJson: String, gender: String): Int {

@@ -32,6 +32,8 @@ import com.storybrain.app.data.ReadingPositionEntity
 import com.storybrain.app.data.ReadingMarkEntity
 import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReaderTheme
+import com.storybrain.app.tts.BlockSpeakController
+import com.storybrain.app.tts.VoiceResolver
 import java.util.UUID
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
@@ -159,6 +161,9 @@ enum class ReaderMode { PLAIN_TEXT, DIALOGUE }
 
 /** 书签跳转目标（书签列表点击后一次性消费）。 */
 data class JumpTarget(val bookId: String, val chapterId: String, val sourceOffset: Int)
+
+/** 对话块点读状态（正在朗读的块）。 */
+data class BlockSpeakUiState(val chapterId: String, val blockIndex: Int, val playing: Boolean)
 
 private fun ReaderMode.toPreferenceMode(): ReaderDisplayMode = when (this) {
     ReaderMode.PLAIN_TEXT -> ReaderDisplayMode.PLAIN_TEXT
@@ -403,6 +408,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteReadingMark(markId: String) {
         viewModelScope.launch { repository.deleteReadingMark(markId) }
+    }
+
+    // ---- 对话块点读（2.5）----
+
+    private val _blockSpeak = MutableStateFlow<BlockSpeakUiState?>(null)
+    val blockSpeak: StateFlow<BlockSpeakUiState?> = _blockSpeak
+
+    private val _blockSpeakError = MutableStateFlow<String?>(null)
+    val blockSpeakError: StateFlow<String?> = _blockSpeakError
+
+    private val blockSpeakController by lazy {
+        BlockSpeakController(
+            context = application,
+            repository = repository,
+            settings = TtsSettingsStore(application),
+            resolver = VoiceResolver(repository, TtsSettingsStore(application))
+        )
+    }
+
+    fun speakDialogueBlock(bookId: String, chapterId: String, blockIndex: Int, speaker: String, text: String) {
+        val current = _blockSpeak.value
+        if (current?.playing == true && current.chapterId == chapterId && current.blockIndex == blockIndex) {
+            stopBlockSpeak()
+            return
+        }
+        viewModelScope.launch {
+            blockSpeakController.stop()
+            _blockSpeak.value = BlockSpeakUiState(chapterId, blockIndex, playing = true)
+            val characters = repository.getCharacters(bookId)
+            val character = characters.firstOrNull { it.canonicalName == speaker }
+            runCatching {
+                blockSpeakController.speak(bookId, speaker, character, text) {
+                    if (_blockSpeak.value?.chapterId == chapterId && _blockSpeak.value?.blockIndex == blockIndex) {
+                        _blockSpeak.value = null
+                    }
+                }
+            }.onFailure { error ->
+                _blockSpeak.value = null
+                _blockSpeakError.value = error.message ?: "朗读失败"
+            }
+        }
+    }
+
+    fun stopBlockSpeak() {
+        blockSpeakController.stop()
+        _blockSpeak.value = null
+    }
+
+    fun clearBlockSpeakError() {
+        _blockSpeakError.value = null
     }
 
     fun readerPosition(

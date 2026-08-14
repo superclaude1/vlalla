@@ -25,7 +25,7 @@ class ReaderPreferencesTest {
             ReaderPreferences(fontSizeSp = 200).normalized().fontSizeSp
         )
         assertEquals(
-            ReaderPreferences.MIN_LINE_HEIGHT_SP,
+            ReaderPreferences.DEFAULT_FONT_SIZE_SP + ReaderPreferences.MIN_LINE_GAP_SP,
             ReaderPreferences(lineHeightSp = 1).normalized().lineHeightSp
         )
         assertEquals(
@@ -69,7 +69,10 @@ class ReaderPreferencesTest {
         )
 
         assertEquals(ReaderPreferences.DEFAULT_FONT_SIZE_SP, restored.fontSizeSp)
-        assertEquals(ReaderPreferences.MIN_LINE_HEIGHT_SP, restored.lineHeightSp)
+        assertEquals(
+            ReaderPreferences.DEFAULT_FONT_SIZE_SP + ReaderPreferences.MIN_LINE_GAP_SP,
+            restored.lineHeightSp
+        )
         assertEquals(ReaderPreferences.MAX_HORIZONTAL_PADDING_DP, restored.horizontalPaddingDp)
         assertEquals(ReaderDisplayMode.PLAIN_TEXT, restored.displayMode)
     }

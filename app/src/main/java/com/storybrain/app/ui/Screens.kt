@@ -124,9 +124,14 @@ import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
 import com.storybrain.app.reader.ReaderParagraphs
 import com.storybrain.app.reader.ReaderPagerPolicy
+import com.storybrain.app.reader.ReaderPositionPolicy
+import com.storybrain.app.reader.ReaderPositionSamplingPolicy
+import com.storybrain.app.reader.ReaderViewport
 import com.storybrain.app.reader.ReaderPreferences
+import com.storybrain.app.reader.ReaderProgressPolicy
 import com.storybrain.app.reader.ReadingBlock
 import com.storybrain.app.reader.TextToChatParser
+import kotlinx.coroutines.flow.drop
 import org.json.JSONArray
 import kotlin.math.PI
 import kotlin.math.cos
@@ -635,6 +640,7 @@ fun ReaderScreen(
     var showMoreSheet by rememberSaveable { mutableStateOf(false) }
     val requestedIndex = ReaderPagerPolicy.startIndex(chapters, chapterId)
     val currentIndex = requestedIndex ?: -1
+    val progressSummary = ReaderProgressPolicy.summarize(currentIndex, chapters.size)
     val knownSpeakers = remember(chapterMentionCharacters, characters) {
         ReaderSpeakerPolicy.buildKnownSpeakers(chapterMentionCharacters, characters)
     }
@@ -764,7 +770,11 @@ fun ReaderScreen(
                         onClick = { openReaderChapter(currentIndex - 1) }
                     ) { Text(ReactReferenceContract.readerBottomActions[0]) }
                     Text(
-                        "${ReactReferenceContract.readerBottomActions[1]}\n${(currentIndex + 1).coerceAtLeast(0)}/${chapters.size}",
+                        if (progressSummary.chapterCount == 0) {
+                            "${ReactReferenceContract.readerBottomActions[1]}\n0/0"
+                        } else {
+                            "${progressSummary.percent}% · ${progressSummary.chapterNumber}/${progressSummary.chapterCount}\n余 ${progressSummary.remainingChapters} 章"
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
@@ -802,8 +812,68 @@ fun ReaderScreen(
             val blocks = remember(currentChapter?.content, knownSpeakers) {
                 currentChapter?.let { TextToChatParser.parse(currentChapter.content, knownSpeakers) }.orEmpty()
             }
+            val readerItemCount = if (readerMode == ReaderMode.PLAIN_TEXT) paragraphs.size else blocks.size
+            key(currentChapter?.id, readerPreferences.displayMode) {
+            val savedPosition = remember(
+                bookId,
+                currentChapter?.id,
+                readerPreferences.displayMode
+            ) {
+                currentChapter?.id?.let {
+                    viewModel.readerPosition(bookId, it, readerPreferences.displayMode)
+                }
+            }
+            val restoredViewport = remember(
+                savedPosition,
+                bookId,
+                currentChapter?.id,
+                readerPreferences.displayMode,
+                readerItemCount
+            ) {
+                ReaderPositionPolicy.restore(
+                    saved = savedPosition,
+                    bookId = bookId,
+                    chapterId = currentChapter?.id.orEmpty(),
+                    displayMode = readerPreferences.displayMode,
+                    itemCount = readerItemCount
+                )
+            }
+            val readerListState = rememberLazyListState(
+                initialFirstVisibleItemIndex = restoredViewport?.itemIndex ?: 0,
+                initialFirstVisibleItemScrollOffset = restoredViewport?.itemOffsetPx ?: 0
+            )
+            LaunchedEffect(
+                readerListState,
+                bookId,
+                currentChapter?.id,
+                readerPreferences.displayMode,
+                readerItemCount
+            ) {
+                val currentChapterId = currentChapter?.id ?: return@LaunchedEffect
+                if (readerItemCount <= 0) return@LaunchedEffect
+                var lastPersistedViewport = restoredViewport
+                snapshotFlow {
+                    ReaderViewport(
+                        itemIndex = readerListState.firstVisibleItemIndex,
+                        itemOffsetPx = readerListState.firstVisibleItemScrollOffset
+                    )
+                }.drop(1).collect { viewport ->
+                    if (!ReaderPositionSamplingPolicy.shouldPersist(lastPersistedViewport, viewport)) {
+                        return@collect
+                    }
+                    viewModel.saveReaderPosition(
+                        bookId,
+                        currentChapterId,
+                        readerPreferences.displayMode,
+                        viewport.itemIndex,
+                        viewport.itemOffsetPx
+                    )
+                    lastPersistedViewport = viewport
+                }
+            }
             LazyColumn(
-                Modifier.fillMaxSize(),
+                state = readerListState,
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     horizontal = readerPreferences.horizontalPaddingDp.dp,
                     vertical = (18 + ReactReferenceContract.readerBottomContentPaddingDp + ReactReferenceContract.bottomNavigationHeightDp).dp
@@ -832,7 +902,7 @@ fun ReaderScreen(
                     }
                 }
                 if (readerMode == ReaderMode.PLAIN_TEXT) {
-                    items(paragraphs) { paragraph ->
+                    itemsIndexed(paragraphs, key = { index, _ -> "paragraph-$index" }) { _, paragraph ->
                         Text(
                             text = paragraph,
                             modifier = Modifier.fillMaxWidth().combinedClickable(
@@ -853,7 +923,7 @@ fun ReaderScreen(
                         )
                     }
                 } else {
-                    items(blocks) { block ->
+                    itemsIndexed(blocks, key = { index, _ -> "block-$index" }) { _, block ->
                         when (block) {
                             is ReadingBlock.Dialogue -> DialogueBubble(
                                 block = block,
@@ -882,6 +952,7 @@ fun ReaderScreen(
                         }
                     }
                 }
+            }
             }
         }
         }

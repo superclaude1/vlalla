@@ -25,6 +25,8 @@ import com.storybrain.app.importer.ImportedNovel
 import com.storybrain.app.importer.NovelStreamImporter
 import com.storybrain.app.export.Neo4jExporter
 import com.storybrain.app.reader.ReaderDisplayMode
+import com.storybrain.app.reader.ReaderPosition
+import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
@@ -189,6 +191,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val memoryActionState = _memoryActionState.asStateFlow()
     private val readerPreferencesStore = ReaderPreferencesStore(application)
     val readerPreferences = readerPreferencesStore.preferences
+    private val readerPositionStore = ReaderPositionStore(application)
     private val _readerMode = MutableStateFlow(readerPreferences.value.displayMode.toReaderMode())
     val readerMode = _readerMode.asStateFlow()
     private val memoryPreferences = application.getSharedPreferences("memory_library_v3", Application.MODE_PRIVATE)
@@ -320,6 +323,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun adjustReaderFontSize(delta: Int) {
         readerPreferencesStore.update { it.adjustFontSize(delta) }
+    }
+
+    fun readerPosition(
+        bookId: String,
+        chapterId: String,
+        displayMode: ReaderDisplayMode
+    ): ReaderPosition? = readerPositionStore.read(bookId, chapterId, displayMode)
+
+    fun saveReaderPosition(
+        bookId: String,
+        chapterId: String,
+        displayMode: ReaderDisplayMode,
+        itemIndex: Int,
+        itemOffsetPx: Int
+    ) {
+        val position = ReaderPosition(
+            bookId = bookId,
+            chapterId = chapterId,
+            displayMode = displayMode,
+            itemIndex = itemIndex,
+            itemOffsetPx = itemOffsetPx
+        )
+        readerPositionStore.save(position)
     }
 
     @Synchronized

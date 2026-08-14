@@ -43,7 +43,7 @@ class ReactReferenceContractTest {
         assertTrue(screens.contains("ModalBottomSheet("))
         assertTrue(screens.contains("viewModel.generateChapterTts(bookId, current.id)"))
         assertTrue(screens.contains("viewModel.saveNewMemory("))
-        assertTrue(screens.contains("fontFamily = ReactReferenceContract.readerFontFamily"))
+        assertTrue(screens.contains("ReactReferenceContract.readerFontFamily"))
         assertTrue(screens.contains("Text(\"纯文本模式\")"))
         assertTrue(screens.contains("Text(\"对话模式\")"))
         assertTrue(screens.contains("DialogueBubble("))

@@ -11,7 +11,7 @@ class ChapterCharacterMentionContractTest {
         val entities = File("src/main/java/com/storybrain/app/data/Entities.kt").readText()
         assertTrue(entities.contains("data class ChapterCharacterMentionEntity"))
         assertTrue(database.contains("ChapterCharacterMentionEntity::class"))
-        assertTrue(database.contains("version = 10"))
+        assertTrue(database.contains("version = 11"))
         assertTrue(database.contains("Migration(4, 5)"))
         assertTrue(database.contains("Migration(5, 6)"))
         assertTrue(database.contains("Migration(6, 7)"))

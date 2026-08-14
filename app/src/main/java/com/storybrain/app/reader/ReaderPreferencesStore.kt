@@ -15,7 +15,10 @@ class ReaderPreferencesStore(context: Context) {
             .putInt(ReaderPreferences.KEY_FONT_SIZE, next.fontSizeSp)
             .putInt(ReaderPreferences.KEY_LINE_HEIGHT, next.lineHeightSp)
             .putInt(ReaderPreferences.KEY_HORIZONTAL_PADDING, next.horizontalPaddingDp)
+            .putInt(ReaderPreferences.KEY_PARAGRAPH_SPACING, next.paragraphSpacingDp)
             .putString(ReaderPreferences.KEY_DISPLAY_MODE, next.displayMode.name)
+            .putString(ReaderPreferences.KEY_THEME, next.theme.name)
+            .putBoolean(ReaderPreferences.KEY_SERIF_FONT, next.serifFont)
             .apply()
         _preferences.value = next
     }
@@ -33,10 +36,22 @@ class ReaderPreferencesStore(context: Context) {
                     ReaderPreferences.KEY_HORIZONTAL_PADDING,
                     ReaderPreferences.DEFAULT_HORIZONTAL_PADDING_DP
                 ).toString(),
+            ReaderPreferences.KEY_PARAGRAPH_SPACING to storage
+                .getInt(
+                    ReaderPreferences.KEY_PARAGRAPH_SPACING,
+                    ReaderPreferences.DEFAULT_PARAGRAPH_SPACING_DP
+                ).toString(),
             ReaderPreferences.KEY_DISPLAY_MODE to storage.getString(
                 ReaderPreferences.KEY_DISPLAY_MODE,
                 ReaderDisplayMode.PLAIN_TEXT.name
-            )
+            ),
+            ReaderPreferences.KEY_THEME to storage.getString(
+                ReaderPreferences.KEY_THEME,
+                com.storybrain.app.data.ReaderTheme.PAPER.name
+            ),
+            ReaderPreferences.KEY_SERIF_FONT to storage
+                .getBoolean(ReaderPreferences.KEY_SERIF_FONT, false)
+                .toString()
         )
     )
 

@@ -679,6 +679,28 @@ class StoryRepository(private val database: AppDatabase) {
         dao.deleteBook(bookId)
     }
 
+    // ---- 阅读器（v0.5.0）----
+
+    fun observeReadingPreference(bookId: String) = dao.observeReadingPreference(bookId)
+
+    suspend fun getReadingPreference(bookId: String) = dao.getReadingPreference(bookId)
+
+    suspend fun upsertReadingPreference(preference: ReadingPreferenceEntity) = dao.upsertReadingPreference(preference)
+
+    fun observeReadingPosition(bookId: String) = dao.observeReadingPosition(bookId)
+
+    suspend fun getReadingPosition(bookId: String) = dao.getReadingPosition(bookId)
+
+    suspend fun upsertReadingPosition(position: ReadingPositionEntity) = dao.upsertReadingPosition(position)
+
+    fun observeReadingMarks(bookId: String) = dao.observeReadingMarks(bookId)
+
+    fun observeChapterReadingMarks(chapterId: String) = dao.observeChapterReadingMarks(chapterId)
+
+    suspend fun upsertReadingMark(mark: ReadingMarkEntity) = dao.upsertReadingMark(mark)
+
+    suspend fun deleteReadingMark(markId: String) = dao.deleteReadingMark(markId)
+
     private fun stableMemoryId(sourceKey: String): String = UUID.nameUUIDFromBytes(
         sourceKey.toByteArray(StandardCharsets.UTF_8)
     ).toString()

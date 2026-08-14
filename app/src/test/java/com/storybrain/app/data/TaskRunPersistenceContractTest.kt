@@ -18,7 +18,7 @@ class TaskRunPersistenceContractTest {
         assertTrue(entities.contains("data class TaskEventEntity"))
         assertTrue(database.contains("TaskRunEntity::class"))
         assertTrue(database.contains("TaskEventEntity::class"))
-        assertTrue(database.contains("version = 10"))
+        assertTrue(database.contains("version = 11"))
         assertTrue(database.contains("Migration(5, 6)"))
         assertTrue(database.contains("Migration(8, 9)"))
         assertTrue(database.contains("CREATE TABLE IF NOT EXISTS `task_runs`"))
@@ -79,7 +79,7 @@ class TaskRunPersistenceContractTest {
     fun databaseOpenRecoversInterruptedAnalysisWithoutSchemaUpgrade() {
         val database = sourceRoot.resolve("data/AppDatabase.kt").readText()
 
-        assertTrue(database.contains("version = 10"))
+        assertTrue(database.contains("version = 11"))
         assertTrue(database.contains("addCallback(ANALYSIS_RECOVERY_CALLBACK)"))
         assertTrue(database.contains("override fun onOpen(db: SupportSQLiteDatabase)"))
         assertTrue(database.contains("analysisStatus = 'COMPLETED'"))

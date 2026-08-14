@@ -36,20 +36,15 @@ class ReaderFunctionParityContractTest {
     }
 
     @Test
-    fun readerRestoresAndPersistsAnIntraChapterViewportPerMode() {
+    fun readerRestoresAndPersistsSourceOffsetPosition() {
         val viewModel = File("src/main/java/com/storybrain/app/ui/AppViewModel.kt").readText()
-        assertTrue(viewModel.contains("ReaderPositionStore(application)"))
-        assertTrue(viewModel.contains("fun readerPosition("))
-        assertTrue(viewModel.contains("displayMode: ReaderDisplayMode"))
-        assertTrue(screens.contains("viewModel.readerPosition(bookId, it, readerPreferences.displayMode)"))
-        assertTrue(screens.contains("key(currentChapter?.id, readerPreferences.displayMode)"))
-        assertTrue(screens.contains("ReaderPositionPolicy.restore("))
-        assertTrue(screens.contains("initialFirstVisibleItemIndex = restoredViewport?.itemIndex ?: 0"))
-        assertTrue(screens.contains("ReaderViewport("))
+        assertTrue(viewModel.contains("fun saveReadingOffset("))
+        assertTrue(viewModel.contains("fun observeReadingPosition(bookId: String)"))
+        assertTrue(screens.contains("viewModel.observeReadingPosition(bookId)"))
+        assertTrue(screens.contains("key(currentChapter?.id, readerPreferences)"))
+        assertTrue(screens.contains("pages.indexOfFirst { storedOffset < it.endOffset }"))
+        assertTrue(screens.contains("viewModel.saveReadingOffset("))
         assertTrue(screens.contains(".drop(1).collect"))
-        assertTrue(screens.contains("ReaderPositionSamplingPolicy.shouldPersist"))
-        assertTrue(screens.contains("viewModel.saveReaderPosition("))
-        assertTrue(screens.contains("readerPreferences.displayMode,"))
     }
 
     @Test
@@ -62,7 +57,7 @@ class ReaderFunctionParityContractTest {
     @Test
     fun dialogueModeUsesParserAliasesAndRealDialogueBubble() {
         assertTrue(screens.contains("ReaderSpeakerPolicy.buildKnownSpeakers"))
-        assertTrue(screens.contains("TextToChatParser.parse(currentChapter.content, knownSpeakers)"))
+        assertTrue(screens.contains("ReaderDocument.create(it, knownSpeakers)"))
         assertTrue(screens.contains("is ReadingBlock.Dialogue -> DialogueBubble("))
         assertTrue(screens.contains("characterId = chapterMentionCharacters.firstOrNull"))
     }
@@ -91,9 +86,9 @@ class ReaderFunctionParityContractTest {
     }
 
     @Test
-    fun readerContentLeavesSpaceBelowLastParagraphForFixedBottomBar() {
+    fun readerContentKeepsBottomSpaceForFixedBottomBar() {
         assertEquals(96, ReactReferenceContract.readerBottomContentPaddingDp)
-        assertTrue(screens.contains("bottomNavigationHeightDp"))
+        assertTrue(screens.contains("Modifier.fillMaxSize().padding(padding)"))
     }
     @Test
     fun ttsAndBothMemoryFlowsRemainReachableWithFeedback() {
@@ -101,7 +96,7 @@ class ReaderFunctionParityContractTest {
         assertTrue(screens.contains("viewModel.playChapterTts(current.id, current.ttsManifestPath.orEmpty())"))
         assertTrue(screens.contains("viewModel.stopChapterTts()"))
         assertTrue(screens.contains("content = current.content"))
-        assertTrue(screens.contains("content = paragraph"))
+        assertTrue(screens.contains("content = segmentText"))
         assertTrue(screens.contains("content = block.text"))
         assertTrue(screens.contains("memoryAction.message"))
         assertTrue(screens.contains("MemoryEditorDialog("))

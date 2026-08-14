@@ -400,4 +400,39 @@ interface StoryDao {
 
     @Query("DELETE FROM plot_nodes WHERE bookId = :bookId")
     suspend fun deletePlotNodesForBook(bookId: String)
+
+    // ---- 阅读器（v0.5.0）----
+
+    @Query("SELECT * FROM reading_preferences WHERE bookId = :bookId")
+    fun observeReadingPreference(bookId: String): Flow<ReadingPreferenceEntity?>
+
+    @Query("SELECT * FROM reading_preferences WHERE bookId = :bookId")
+    suspend fun getReadingPreference(bookId: String): ReadingPreferenceEntity?
+
+    @Upsert
+    suspend fun upsertReadingPreference(preference: ReadingPreferenceEntity)
+
+    @Query("DELETE FROM reading_preferences WHERE bookId = :bookId")
+    suspend fun deleteReadingPreference(bookId: String)
+
+    @Query("SELECT * FROM reading_positions WHERE bookId = :bookId")
+    fun observeReadingPosition(bookId: String): Flow<ReadingPositionEntity?>
+
+    @Query("SELECT * FROM reading_positions WHERE bookId = :bookId")
+    suspend fun getReadingPosition(bookId: String): ReadingPositionEntity?
+
+    @Upsert
+    suspend fun upsertReadingPosition(position: ReadingPositionEntity)
+
+    @Query("SELECT * FROM reading_marks WHERE bookId = :bookId ORDER BY updatedAt DESC")
+    fun observeReadingMarks(bookId: String): Flow<List<ReadingMarkEntity>>
+
+    @Query("SELECT * FROM reading_marks WHERE chapterId = :chapterId ORDER BY startOffset, updatedAt")
+    fun observeChapterReadingMarks(chapterId: String): Flow<List<ReadingMarkEntity>>
+
+    @Upsert
+    suspend fun upsertReadingMark(mark: ReadingMarkEntity)
+
+    @Query("DELETE FROM reading_marks WHERE id = :markId")
+    suspend fun deleteReadingMark(markId: String)
 }

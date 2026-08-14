@@ -33,9 +33,12 @@ import org.json.JSONArray
         TaskRunEntity::class,
         TaskEventEntity::class,
         LlmApiProfileEntity::class,
-        LlmModelEntity::class
+        LlmModelEntity::class,
+        ReadingPreferenceEntity::class,
+        ReadingPositionEntity::class,
+        ReadingMarkEntity::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -46,7 +49,7 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "story-brain.db"
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
             .addCallback(ANALYSIS_RECOVERY_CALLBACK)
             .build()
 
@@ -276,6 +279,34 @@ abstract class AppDatabase : RoomDatabase() {
         internal val MIGRATION_9_10 = object : Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `llm_api_profiles` ADD COLUMN `selectedModel` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
+         * v10 → v11：阅读器升级。纯增量：
+         * - reading_preferences：单书阅读偏好覆盖
+         * - reading_positions：字符偏移进度（迁移时按当前章节初始化）
+         * - reading_marks：书签/高亮/批注
+         */
+        internal val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_preferences` (`bookId` TEXT NOT NULL, `mode` TEXT NOT NULL, `useGlobalStyle` INTEGER NOT NULL, `theme` TEXT NOT NULL, `fontSizeSp` REAL NOT NULL, `lineHeightMultiplier` REAL NOT NULL, `paragraphSpacingDp` REAL NOT NULL, `horizontalPaddingDp` INTEGER NOT NULL, `serifFont` INTEGER NOT NULL, `autoFollowAudio` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`bookId`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_positions` (`bookId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `sourceOffset` INTEGER NOT NULL, `scrollOffsetPx` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`bookId`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_positions_chapterId` ON `reading_positions` (`chapterId`)")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `reading_marks` (`id` TEXT NOT NULL, `bookId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `type` TEXT NOT NULL, `startOffset` INTEGER NOT NULL, `endOffset` INTEGER NOT NULL, `excerpt` TEXT NOT NULL, `note` TEXT NOT NULL, `colorKey` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_bookId` ON `reading_marks` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_chapterId` ON `reading_marks` (`chapterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_reading_marks_bookId_type` ON `reading_marks` (`bookId`,`type`)")
+                // 老数据按当前章节初始化阅读位置（对齐本地 0.6.0 MIGRATION_4_5 语义）
+                db.execSQL(
+                    """INSERT OR IGNORE INTO `reading_positions` (`bookId`,`chapterId`,`sourceOffset`,`scrollOffsetPx`,`updatedAt`) SELECT b.`id`, c.`id`, 0, 0, b.`importedAt` FROM `books` b JOIN `chapters` c ON c.`bookId` = b.`id` AND c.`chapterIndex` = b.`currentChapterIndex`"""
+                )
             }
         }
     }

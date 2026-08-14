@@ -46,10 +46,10 @@ class FinalBlockingReviewContractTest {
     @Test
     fun readerUsesOriginalParagraphsAndConfirmableSaveWithFeedback() {
         val screens = ui.resolve("Screens.kt").readText()
-        assertTrue(screens.contains("ReaderParagraphs.split(it.content)"))
-        assertTrue(screens.contains("TextToChatParser.parse(currentChapter.content, knownSpeakers)"))
+        assertTrue(screens.contains("ReaderDocument.create(it, knownSpeakers)"))
         assertTrue(screens.contains("pendingMemory = PendingReadingMemory("))
         assertTrue(screens.contains("content = current.content"))
+        assertTrue(screens.contains("content = segmentText"))
         assertTrue(screens.contains("memoryAction.message"))
     }
 

@@ -28,6 +28,8 @@ import com.storybrain.app.reader.ReaderDisplayMode
 import com.storybrain.app.reader.ReaderPosition
 import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
+import com.storybrain.app.data.ReadingPositionEntity
+import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
 import com.storybrain.app.settings.RequestStage
@@ -324,6 +326,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun adjustReaderFontSize(delta: Int) {
         readerPreferencesStore.update { it.adjustFontSize(delta) }
     }
+
+    fun adjustReaderLineHeight(delta: Int) {
+        readerPreferencesStore.update { it.adjustLineHeight(delta) }
+    }
+
+    fun adjustReaderParagraphSpacing(delta: Int) {
+        readerPreferencesStore.update { it.adjustParagraphSpacing(delta) }
+    }
+
+    fun adjustReaderHorizontalPadding(delta: Int) {
+        readerPreferencesStore.update { it.adjustHorizontalPadding(delta) }
+    }
+
+    fun setReaderTheme(theme: ReaderTheme) {
+        readerPreferencesStore.update { it.withTheme(theme) }
+    }
+
+    fun setReaderSerifFont(enabled: Boolean) {
+        readerPreferencesStore.update { it.withSerifFont(enabled) }
+    }
+
+    /** 字符偏移进度（分页阅读）。 */
+    fun saveReadingOffset(bookId: String, chapterId: String, sourceOffset: Int) {
+        viewModelScope.launch {
+            repository.upsertReadingPosition(
+                ReadingPositionEntity(
+                    bookId = bookId,
+                    chapterId = chapterId,
+                    sourceOffset = sourceOffset,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    fun observeReadingPosition(bookId: String) = repository.observeReadingPosition(bookId)
 
     fun readerPosition(
         bookId: String,

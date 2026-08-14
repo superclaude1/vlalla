@@ -10,9 +10,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -92,6 +94,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.material3.Switch
+import com.storybrain.app.data.ReaderTheme
+import com.storybrain.app.reader.PaginationParams
+import com.storybrain.app.reader.Paginator
+import com.storybrain.app.reader.ReaderDocument
+import com.storybrain.app.reader.ReaderPage
+import com.storybrain.app.reader.TextMeasurerLineMeasurer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
@@ -713,6 +728,64 @@ fun ReaderScreen(
             )
             HorizontalDivider()
             ListItem(
+                headlineContent = { Text("阅读主题") },
+                trailingContent = {
+                    Row {
+                        ReaderTheme.entries.forEach { theme ->
+                            val selected = readerPreferences.theme == theme
+                            TextButton(onClick = { viewModel.setReaderTheme(theme) }) {
+                                Text(
+                                    readerThemeLabel(theme),
+                                    color = if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("行距") },
+                supportingContent = { Text("${readerPreferences.lineHeightSp} sp") },
+                trailingContent = {
+                    Row {
+                        TextButton(onClick = { viewModel.adjustReaderLineHeight(-1) }) { Text("行−") }
+                        TextButton(onClick = { viewModel.adjustReaderLineHeight(1) }) { Text("行+") }
+                    }
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("段距") },
+                supportingContent = { Text("${readerPreferences.paragraphSpacingDp} dp") },
+                trailingContent = {
+                    Row {
+                        TextButton(onClick = { viewModel.adjustReaderParagraphSpacing(-1) }) { Text("段−") }
+                        TextButton(onClick = { viewModel.adjustReaderParagraphSpacing(1) }) { Text("段+") }
+                    }
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("边距") },
+                supportingContent = { Text("${readerPreferences.horizontalPaddingDp} dp") },
+                trailingContent = {
+                    Row {
+                        TextButton(onClick = { viewModel.adjustReaderHorizontalPadding(-1) }) { Text("窄") }
+                        TextButton(onClick = { viewModel.adjustReaderHorizontalPadding(1) }) { Text("宽") }
+                    }
+                }
+            )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("衬线字体") },
+                trailingContent = {
+                    Switch(checked = readerPreferences.serifFont, onCheckedChange = viewModel::setReaderSerifFont)
+                }
+            )
+            HorizontalDivider()
+            ListItem(
                 headlineContent = { Text(ReactReferenceContract.readerSheetActions[0]) },
                 leadingContent = { Icon(Icons.Rounded.GraphicEq, null) },
                 modifier = Modifier.clickable {
@@ -812,148 +885,138 @@ fun ReaderScreen(
                 userScrollEnabled = chapters.size > 1
             ) { page ->
                 val currentChapter = chapters.getOrNull(page)
-            val paragraphs = remember(currentChapter?.content) {
-                currentChapter?.let { ReaderParagraphs.split(it.content) }.orEmpty()
+            key(currentChapter?.id, readerPreferences) {
+            val document = remember(currentChapter?.content, knownSpeakers) {
+                currentChapter?.content?.let { ReaderDocument.create(it, knownSpeakers) }
             }
-            val blocks = remember(currentChapter?.content, knownSpeakers) {
-                currentChapter?.let { TextToChatParser.parse(currentChapter.content, knownSpeakers) }.orEmpty()
-            }
-            val readerItemCount = if (readerMode == ReaderMode.PLAIN_TEXT) paragraphs.size else blocks.size
-            key(currentChapter?.id, readerPreferences.displayMode) {
-            val savedPosition = remember(
-                bookId,
-                currentChapter?.id,
-                readerPreferences.displayMode
-            ) {
-                currentChapter?.id?.let {
-                    viewModel.readerPosition(bookId, it, readerPreferences.displayMode)
-                }
-            }
-            val restoredViewport = remember(
-                savedPosition,
-                bookId,
-                currentChapter?.id,
-                readerPreferences.displayMode,
-                readerItemCount
-            ) {
-                ReaderPositionPolicy.restore(
-                    saved = savedPosition,
-                    bookId = bookId,
-                    chapterId = currentChapter?.id.orEmpty(),
-                    displayMode = readerPreferences.displayMode,
-                    itemCount = readerItemCount
+            val textMeasurer = rememberTextMeasurer()
+            val textStyle = remember(readerPreferences) {
+                TextStyle(
+                    fontSize = readerPreferences.fontSizeSp.sp,
+                    lineHeight = readerPreferences.lineHeightSp.sp,
+                    fontFamily = if (readerPreferences.serifFont) FontFamily.Serif
+                    else ReactReferenceContract.readerFontFamily
                 )
             }
-            val readerListState = rememberLazyListState(
-                initialFirstVisibleItemIndex = restoredViewport?.itemIndex ?: 0,
-                initialFirstVisibleItemScrollOffset = restoredViewport?.itemOffsetPx ?: 0
-            )
-            LaunchedEffect(
-                readerListState,
-                bookId,
-                currentChapter?.id,
-                readerPreferences.displayMode,
-                readerItemCount
-            ) {
-                val currentChapterId = currentChapter?.id ?: return@LaunchedEffect
-                if (readerItemCount <= 0) return@LaunchedEffect
-                var lastPersistedViewport = restoredViewport
-                snapshotFlow {
-                    ReaderViewport(
-                        itemIndex = readerListState.firstVisibleItemIndex,
-                        itemOffsetPx = readerListState.firstVisibleItemScrollOffset
-                    )
-                }.drop(1).collect { viewport ->
-                    if (!ReaderPositionSamplingPolicy.shouldPersist(lastPersistedViewport, viewport)) {
-                        return@collect
-                    }
-                    viewModel.saveReaderPosition(
-                        bookId,
-                        currentChapterId,
-                        readerPreferences.displayMode,
-                        viewport.itemIndex,
-                        viewport.itemOffsetPx
-                    )
-                    lastPersistedViewport = viewport
+            val readingPosition by viewModel.observeReadingPosition(bookId)
+                .collectAsStateWithLifecycle(initialValue = null)
+            BoxWithConstraints(Modifier.fillMaxSize().background(readerThemeColors(readerPreferences.theme).first)) {
+                val density = LocalDensity.current
+                val contentWidthPx = remember(maxWidth, readerPreferences.horizontalPaddingDp, density) {
+                    with(density) { (maxWidth - readerPreferences.horizontalPaddingDp.dp * 2).toPx().toInt().coerceAtLeast(1) }
                 }
-            }
-            LazyColumn(
-                state = readerListState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(
-                    horizontal = readerPreferences.horizontalPaddingDp.dp,
-                    vertical = (18 + ReactReferenceContract.readerBottomContentPaddingDp + ReactReferenceContract.bottomNavigationHeightDp).dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                if (ttsState.chapterId == currentChapter?.id && (ttsState.progress != null || ttsState.message != null)) {
-                    item {
-                        Text(
-                            ttsState.progress ?: ttsState.message.orEmpty(),
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                            color = if (ttsState.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        if (ttsState.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(bottom = 10.dp))
+                val pageHeightPx = remember(maxHeight, density) { with(density) { maxHeight.toPx().toInt().coerceAtLeast(1) } }
+                val lineHeightPx = remember(readerPreferences.lineHeightSp, density) {
+                    with(density) { readerPreferences.lineHeightSp.sp.toPx() }
+                }
+                val paragraphSpacingPx = remember(readerPreferences.paragraphSpacingDp, density) {
+                    with(density) { readerPreferences.paragraphSpacingDp.dp.toPx() }
+                }
+                var pages by remember { mutableStateOf<List<ReaderPage>>(emptyList()) }
+                LaunchedEffect(document, textStyle, contentWidthPx, pageHeightPx, lineHeightPx, paragraphSpacingPx) {
+                    val doc = document
+                    if (doc == null) {
+                        pages = emptyList()
+                        return@LaunchedEffect
+                    }
+                    val params = PaginationParams(contentWidthPx, pageHeightPx, lineHeightPx, paragraphSpacingPx)
+                    val blocks = doc.blocks(readerMode)
+                    pages = withContext(Dispatchers.Default) {
+                        Paginator.paginate(blocks, params, TextMeasurerLineMeasurer(textMeasurer, textStyle))
                     }
                 }
-                if (memoryAction.message != null) {
-                    item {
-                        Text(
-                            memoryAction.message.orEmpty(),
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                            color = if (memoryAction.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                if (document == null || pages.isEmpty()) {
+                    CircularProgressIndicator(Modifier.align(Alignment.Center))
+                } else {
+                    val textColor = readerThemeColors(readerPreferences.theme).second
+                    val storedOffset = readingPosition?.sourceOffset
+                    val initialPage = remember(pages, storedOffset) {
+                        if (storedOffset == null) 0
+                        else pages.indexOfFirst { storedOffset < it.endOffset }.coerceAtLeast(0)
                     }
-                }
-                if (readerMode == ReaderMode.PLAIN_TEXT) {
-                    itemsIndexed(paragraphs, key = { index, _ -> "paragraph-$index" }) { _, paragraph ->
-                        Text(
-                            text = paragraph,
-                            modifier = Modifier.fillMaxWidth().combinedClickable(
-                                onClick = {},
-                                onLongClick = {
-                                    pendingMemory = PendingReadingMemory(
-                                        title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章摘录",
-                                        content = paragraph,
-                                        chapterIndex = currentChapter?.chapterIndex
+                    val pageState = rememberPagerState(initialPage = initialPage, pageCount = { pages.size })
+                    LaunchedEffect(pageState, bookId, currentChapter?.id) {
+                        snapshotFlow { pageState.settledPage }.drop(1).collect { pageIndex ->
+                            pages.getOrNull(pageIndex)?.let { page ->
+                                viewModel.saveReadingOffset(bookId, currentChapter?.id.orEmpty(), page.startOffset)
+                            }
+                        }
+                    }
+                    if (ttsState.chapterId == currentChapter?.id && (ttsState.progress != null || ttsState.message != null)) {
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                                Text(
+                                    ttsState.progress ?: ttsState.message.orEmpty(),
+                                    color = if (ttsState.isError) MaterialTheme.colorScheme.error else textColor,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                if (ttsState.running) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 4.dp))
+                            }
+                        }
+                    }
+                    if (memoryAction.message != null) {
+                        Surface(
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                memoryAction.message.orEmpty(),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                color = if (memoryAction.isError) MaterialTheme.colorScheme.error else textColor,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                    VerticalPager(
+                        state = pageState,
+                        modifier = Modifier.fillMaxSize()
+                            .padding(horizontal = readerPreferences.horizontalPaddingDp.dp, vertical = 8.dp)
+                    ) { pageIndex ->
+                        val readerPage = pages.getOrNull(pageIndex) ?: return@VerticalPager
+                        Column(Modifier.fillMaxSize()) {
+                            var lineIndex = 0
+                            while (lineIndex < readerPage.lines.size) {
+                                val groupBlockIndex = readerPage.lines[lineIndex].blockIndex
+                                var endIndex = lineIndex + 1
+                                while (endIndex < readerPage.lines.size && readerPage.lines[endIndex].blockIndex == groupBlockIndex) endIndex++
+                                val segmentText = readerPage.lines.subList(lineIndex, endIndex).joinToString("") { it.text }
+                                val block = document.blocks(readerMode).getOrNull(groupBlockIndex)
+                                when (block) {
+                                    is ReadingBlock.Dialogue -> DialogueBubble(
+                                        block = block.copy(text = segmentText),
+                                        fontSizeSp = readerPreferences.fontSizeSp,
+                                        lineHeightSp = readerPreferences.lineHeightSp
+                                    ) {
+                                        pendingMemory = PendingReadingMemory(
+                                            title = "${block.speaker}的原文对白",
+                                            content = block.text,
+                                            characterId = chapterMentionCharacters.firstOrNull { it.canonicalName == block.speaker }?.id
+                                                ?: characters.firstOrNull { it.canonicalName == block.speaker }?.id,
+                                            chapterIndex = currentChapter?.chapterIndex
+                                        )
+                                    }
+                                    else -> Text(
+                                        text = segmentText,
+                                        modifier = Modifier.fillMaxWidth().combinedClickable(
+                                            onClick = {},
+                                            onLongClick = {
+                                                pendingMemory = PendingReadingMemory(
+                                                    title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章摘录",
+                                                    content = segmentText,
+                                                    chapterIndex = currentChapter?.chapterIndex
+                                                )
+                                            }
+                                        ).padding(vertical = 4.dp),
+                                        style = textStyle.copy(color = textColor)
                                     )
                                 }
-                            ).padding(vertical = 7.dp),
-                            style = MaterialTheme.typography.bodyLarge.copy(
-                                fontFamily = ReactReferenceContract.readerFontFamily,
-                                fontSize = readerPreferences.fontSizeSp.sp,
-                                lineHeight = readerPreferences.lineHeightSp.sp
-                            )
-                        )
-                    }
-                } else {
-                    itemsIndexed(blocks, key = { index, _ -> "block-$index" }) { _, block ->
-                        when (block) {
-                            is ReadingBlock.Dialogue -> DialogueBubble(
-                                block = block,
-                                fontSizeSp = readerPreferences.fontSizeSp,
-                                lineHeightSp = readerPreferences.lineHeightSp
-                            ) {
-                                pendingMemory = PendingReadingMemory(
-                                    title = "${block.speaker}的原文对白",
-                                    content = block.text,
-                                    characterId = chapterMentionCharacters.firstOrNull { it.canonicalName == block.speaker }?.id
-                                        ?: characters.firstOrNull { it.canonicalName == block.speaker }?.id,
-                                    chapterIndex = currentChapter?.chapterIndex
-                                )
-                            }
-                            is ReadingBlock.Narration -> NarrationCard(
-                                text = block.text,
-                                fontSizeSp = readerPreferences.fontSizeSp,
-                                lineHeightSp = readerPreferences.lineHeightSp
-                            ) {
-                                pendingMemory = PendingReadingMemory(
-                                    title = "第${(currentChapter?.chapterIndex ?: 0) + 1}章旁白",
-                                    content = block.text,
-                                    chapterIndex = currentChapter?.chapterIndex
-                                )
+                                Spacer(Modifier.height(readerPreferences.paragraphSpacingDp.dp))
+                                lineIndex = endIndex
                             }
                         }
                     }
@@ -1025,6 +1088,19 @@ private fun NarrationCard(
 }
 
 private data class PendingReadingMemory(val title: String, val content: String, val characterId: String? = null, val chapterIndex: Int? = null)
+
+private fun readerThemeLabel(theme: ReaderTheme): String = when (theme) {
+    ReaderTheme.PAPER -> "纸张"
+    ReaderTheme.SEPIA -> "羊皮纸"
+    ReaderTheme.NIGHT -> "夜间"
+}
+
+/** (背景色, 正文色) */
+private fun readerThemeColors(theme: ReaderTheme): Pair<Color, Color> = when (theme) {
+    ReaderTheme.PAPER -> Color(0xFFF7F2E7) to Color(0xFF2B2B2B)
+    ReaderTheme.SEPIA -> Color(0xFFEDE3CB) to Color(0xFF4A3B2A)
+    ReaderTheme.NIGHT -> Color(0xFF131313) to Color(0xFFBDBDBD)
+}
 
 @Composable
 fun StoryBrainScreen(

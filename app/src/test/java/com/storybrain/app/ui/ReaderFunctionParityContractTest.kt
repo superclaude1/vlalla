@@ -44,7 +44,7 @@ class ReaderFunctionParityContractTest {
         assertTrue(screens.contains("key(currentChapter?.id, readerPreferences)"))
         assertTrue(screens.contains("pages.indexOfFirst { storedOffset < it.endOffset }"))
         assertTrue(screens.contains("viewModel.saveReadingOffset("))
-        assertTrue(screens.contains(".drop(1).collect"))
+        assertTrue(screens.contains("snapshotFlow { pageState.settledPage }"))
     }
 
     @Test

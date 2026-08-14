@@ -29,7 +29,10 @@ import com.storybrain.app.reader.ReaderPosition
 import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.data.ReadingPositionEntity
+import com.storybrain.app.data.ReadingMarkEntity
+import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReaderTheme
+import java.util.UUID
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
 import com.storybrain.app.settings.RequestStage
@@ -40,6 +43,7 @@ import com.storybrain.app.tts.ChapterTtsEngine
 import com.storybrain.app.tts.EdgeTtsException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
@@ -152,6 +156,9 @@ object MemoryPickerRequestPolicy {
 data class MemoryActionUiState(val running: Boolean = false, val message: String? = null, val isError: Boolean = false)
 
 enum class ReaderMode { PLAIN_TEXT, DIALOGUE }
+
+/** 书签跳转目标（书签列表点击后一次性消费）。 */
+data class JumpTarget(val bookId: String, val chapterId: String, val sourceOffset: Int)
 
 private fun ReaderMode.toPreferenceMode(): ReaderDisplayMode = when (this) {
     ReaderMode.PLAIN_TEXT -> ReaderDisplayMode.PLAIN_TEXT
@@ -362,6 +369,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun observeReadingPosition(bookId: String) = repository.observeReadingPosition(bookId)
+
+    // ---- 书签 / 跳转 ----
+
+    private val _jumpTarget = MutableStateFlow<JumpTarget?>(null)
+    val jumpTarget: StateFlow<JumpTarget?> = _jumpTarget
+
+    fun jumpTo(bookId: String, chapterId: String, sourceOffset: Int) {
+        _jumpTarget.value = JumpTarget(bookId, chapterId, sourceOffset)
+    }
+
+    fun consumeJumpTarget() {
+        _jumpTarget.value = null
+    }
+
+    fun observeReadingMarks(bookId: String) = repository.observeReadingMarks(bookId)
+
+    fun addBookmark(bookId: String, chapterId: String, startOffset: Int, excerpt: String) {
+        viewModelScope.launch {
+            repository.upsertReadingMark(
+                ReadingMarkEntity(
+                    id = UUID.randomUUID().toString(),
+                    bookId = bookId,
+                    chapterId = chapterId,
+                    type = ReadingMarkType.BOOKMARK.name,
+                    startOffset = startOffset,
+                    endOffset = startOffset,
+                    excerpt = excerpt.take(120)
+                )
+            )
+        }
+    }
+
+    fun deleteReadingMark(markId: String) {
+        viewModelScope.launch { repository.deleteReadingMark(markId) }
+    }
 
     fun readerPosition(
         bookId: String,

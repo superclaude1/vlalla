@@ -39,6 +39,8 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudSync
@@ -100,6 +102,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.material3.Switch
 import com.storybrain.app.data.ReaderTheme
+import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.reader.PaginationParams
 import com.storybrain.app.reader.Paginator
 import com.storybrain.app.reader.ReaderDocument
@@ -659,6 +662,15 @@ fun ReaderScreen(
     val readerPreferences by viewModel.readerPreferences.collectAsStateWithLifecycle()
     var pendingMemory by remember { mutableStateOf<PendingReadingMemory?>(null) }
     var showMoreSheet by rememberSaveable { mutableStateOf(false) }
+    var showBookmarksSheet by rememberSaveable { mutableStateOf(false) }
+    val marks by viewModel.observeReadingMarks(bookId).collectAsStateWithLifecycle(initialValue = emptyList())
+    var currentPageStartOffset by remember { mutableIntStateOf(0) }
+    var currentPageExcerpt by remember { mutableStateOf("") }
+    val currentBookmarkedMarkId = remember(marks, chapterId, currentPageStartOffset) {
+        marks.firstOrNull {
+            it.chapterId == chapterId && it.type == ReadingMarkType.BOOKMARK.name && it.startOffset == currentPageStartOffset
+        }?.id
+    }
     val requestedIndex = ReaderPagerPolicy.startIndex(chapters, chapterId)
     val currentIndex = requestedIndex ?: -1
     val progressSummary = ReaderProgressPolicy.summarize(currentIndex, chapters.size)
@@ -808,6 +820,55 @@ fun ReaderScreen(
                     )
                 }
             )
+            HorizontalDivider()
+            ListItem(
+                headlineContent = { Text("书签与笔记") },
+                supportingContent = { Text("${marks.size} 条") },
+                leadingContent = { Icon(Icons.Rounded.BookmarkBorder, null) },
+                modifier = Modifier.clickable {
+                    showMoreSheet = false
+                    showBookmarksSheet = true
+                }
+            )
+            Spacer(Modifier.height(20.dp))
+        }
+    }
+    if (showBookmarksSheet) {
+        ModalBottomSheet(onDismissRequest = { showBookmarksSheet = false }) {
+            Text(
+                "书签与笔记",
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.titleMedium
+            )
+            if (marks.isEmpty()) {
+                Text(
+                    "暂无书签，阅读时点击右上角书签图标添加。",
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(Modifier.weight(1f, fill = false)) {
+                    items(marks, key = { it.id }) { mark ->
+                        val markChapter = chapters.firstOrNull { it.id == mark.chapterId }
+                        ListItem(
+                            headlineContent = {
+                                Text(
+                                    markChapter?.title ?: "章节",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            supportingContent = { Text(mark.excerpt.ifBlank { "书签" }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                            modifier = Modifier.clickable {
+                                showBookmarksSheet = false
+                                viewModel.jumpTo(bookId, mark.chapterId, mark.startOffset)
+                                if (mark.chapterId != chapterId) onOpenChapter(mark.chapterId)
+                            }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            }
             Spacer(Modifier.height(20.dp))
         }
     }
@@ -832,6 +893,18 @@ fun ReaderScreen(
                                 if (ttsState.playing && ttsState.chapterId == chapter?.id) "停止配音" else "播放本章配音"
                             )
                         }
+                    }
+                    IconButton(
+                        onClick = {
+                            val current = chapter ?: return@IconButton
+                            if (currentBookmarkedMarkId != null) viewModel.deleteReadingMark(currentBookmarkedMarkId)
+                            else viewModel.addBookmark(bookId, current.id, currentPageStartOffset, currentPageExcerpt)
+                        }
+                    ) {
+                        Icon(
+                            if (currentBookmarkedMarkId != null) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder,
+                            "书签"
+                        )
                     }
                     IconButton(onClick = { showMoreSheet = true }) { Icon(Icons.Rounded.MoreVert, "更多") }
                 }
@@ -930,14 +1003,23 @@ fun ReaderScreen(
                 } else {
                     val textColor = readerThemeColors(readerPreferences.theme).second
                     val storedOffset = readingPosition?.sourceOffset
-                    val initialPage = remember(pages, storedOffset) {
-                        if (storedOffset == null) 0
-                        else pages.indexOfFirst { storedOffset < it.endOffset }.coerceAtLeast(0)
+                    val jump = viewModel.jumpTarget.collectAsStateWithLifecycle().value
+                    val initialPage = remember(pages, storedOffset, jump, currentChapter?.id) {
+                        when {
+                            jump != null && jump.chapterId == currentChapter?.id ->
+                                pages.indexOfFirst { jump.sourceOffset < it.endOffset }.coerceAtLeast(0)
+                            storedOffset != null ->
+                                pages.indexOfFirst { storedOffset < it.endOffset }.coerceAtLeast(0)
+                            else -> 0
+                        }
                     }
                     val pageState = rememberPagerState(initialPage = initialPage, pageCount = { pages.size })
                     LaunchedEffect(pageState, bookId, currentChapter?.id) {
-                        snapshotFlow { pageState.settledPage }.drop(1).collect { pageIndex ->
+                        viewModel.consumeJumpTarget()
+                        snapshotFlow { pageState.settledPage }.collect { pageIndex ->
                             pages.getOrNull(pageIndex)?.let { page ->
+                                currentPageStartOffset = page.startOffset
+                                currentPageExcerpt = page.lines.joinToString("") { it.text }.take(120)
                                 viewModel.saveReadingOffset(bookId, currentChapter?.id.orEmpty(), page.startOffset)
                             }
                         }

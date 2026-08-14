@@ -8,14 +8,21 @@ data class ReaderPreferences(
     val horizontalPaddingDp: Int = DEFAULT_HORIZONTAL_PADDING_DP,
     val displayMode: ReaderDisplayMode = ReaderDisplayMode.PLAIN_TEXT
 ) {
-    fun normalized(): ReaderPreferences = copy(
-        fontSizeSp = fontSizeSp.coerceIn(MIN_FONT_SIZE_SP, MAX_FONT_SIZE_SP),
-        lineHeightSp = lineHeightSp.coerceIn(MIN_LINE_HEIGHT_SP, MAX_LINE_HEIGHT_SP),
-        horizontalPaddingDp = horizontalPaddingDp.coerceIn(
-            MIN_HORIZONTAL_PADDING_DP,
-            MAX_HORIZONTAL_PADDING_DP
+    fun normalized(): ReaderPreferences {
+        val normalizedFontSize = fontSizeSp.coerceIn(MIN_FONT_SIZE_SP, MAX_FONT_SIZE_SP)
+        val minimumReadableLineHeight = normalizedFontSize + MIN_LINE_GAP_SP
+        return copy(
+            fontSizeSp = normalizedFontSize,
+            lineHeightSp = lineHeightSp.coerceIn(
+                maxOf(MIN_LINE_HEIGHT_SP, minimumReadableLineHeight),
+                MAX_LINE_HEIGHT_SP
+            ),
+            horizontalPaddingDp = horizontalPaddingDp.coerceIn(
+                MIN_HORIZONTAL_PADDING_DP,
+                MAX_HORIZONTAL_PADDING_DP
+            )
         )
-    )
+    }
 
     fun adjustFontSize(delta: Int): ReaderPreferences {
         val current = normalized()

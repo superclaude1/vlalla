@@ -36,6 +36,30 @@ class ReaderFunctionParityContractTest {
     }
 
     @Test
+    fun readerRestoresAndPersistsAnIntraChapterViewportPerMode() {
+        val viewModel = File("src/main/java/com/storybrain/app/ui/AppViewModel.kt").readText()
+        assertTrue(viewModel.contains("ReaderPositionStore(application)"))
+        assertTrue(viewModel.contains("fun readerPosition("))
+        assertTrue(viewModel.contains("displayMode: ReaderDisplayMode"))
+        assertTrue(screens.contains("viewModel.readerPosition(bookId, it, readerPreferences.displayMode)"))
+        assertTrue(screens.contains("key(currentChapter?.id, readerPreferences.displayMode)"))
+        assertTrue(screens.contains("ReaderPositionPolicy.restore("))
+        assertTrue(screens.contains("initialFirstVisibleItemIndex = restoredViewport?.itemIndex ?: 0"))
+        assertTrue(screens.contains("ReaderViewport("))
+        assertTrue(screens.contains(".drop(1).collect"))
+        assertTrue(screens.contains("ReaderPositionSamplingPolicy.shouldPersist"))
+        assertTrue(screens.contains("viewModel.saveReaderPosition("))
+        assertTrue(screens.contains("readerPreferences.displayMode,"))
+    }
+
+    @Test
+    fun readerShowsBoundedProgressAndRemainingChapters() {
+        assertTrue(screens.contains("ReaderProgressPolicy.summarize(currentIndex, chapters.size)"))
+        assertTrue(screens.contains("progressSummary.percent"))
+        assertTrue(screens.contains("progressSummary.remainingChapters"))
+    }
+
+    @Test
     fun dialogueModeUsesParserAliasesAndRealDialogueBubble() {
         assertTrue(screens.contains("ReaderSpeakerPolicy.buildKnownSpeakers"))
         assertTrue(screens.contains("TextToChatParser.parse(currentChapter.content, knownSpeakers)"))

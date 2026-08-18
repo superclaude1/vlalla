@@ -61,6 +61,7 @@ object NetworkFailureClassifier {
         )
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun classifyHttp(
         statusCode: Int,
         body: String,

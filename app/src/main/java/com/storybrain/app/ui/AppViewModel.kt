@@ -17,6 +17,7 @@ import com.storybrain.app.data.ChatSessionEntity
 import com.storybrain.app.data.MemoryItemEntity
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.MemoryWithSelection
+import com.storybrain.app.data.BookEntity
 import com.storybrain.app.data.BookTtsSettingEntity
 import com.storybrain.app.data.BookNarratorBindingEntity
 import com.storybrain.app.data.CharacterVoiceBindingEntity
@@ -29,12 +30,14 @@ import com.storybrain.app.reader.ReaderPosition
 import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.data.ReadingPositionEntity
+import com.storybrain.app.data.CoverGenerationPolicy
 import com.storybrain.app.data.PollinationsCoverGenerator
 import com.storybrain.app.data.ReadingMarkEntity
 import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.tts.BlockSpeakController
 import com.storybrain.app.tts.VoiceResolver
+import java.io.File
 import java.util.UUID
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
@@ -472,6 +475,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 生成/重新生成书籍封面。默认 seed 由 bookId 稳定派生；regenerate 换随机 seed。 */
     fun generateBookCover(bookId: String, title: String, regenerate: Boolean = false) {
+        _coverError.value = null
         val seed = if (regenerate) (System.currentTimeMillis() % 100_000).toInt()
         else PollinationsCoverGenerator.stableSeed(bookId)
         coverGenerator.generate(bookId, title, seed) { result ->
@@ -644,6 +648,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _analysisState.value = _analysisState.value.asFailure(error.message ?: "LLM 分析失败", analysisFailure)
     }
 
+    private fun deleteManagedCover(book: BookEntity) {
+        val filesDir = getApplication<Application>().filesDir
+        book.coverPath?.takeIf { CoverGenerationPolicy.isManagedPath(filesDir, it) }
+            ?.let { File(it).delete() }
+    }
+
     @Synchronized
     fun deleteBook(bookId: String, onComplete: () -> Unit = {}, onError: (String) -> Unit = {}) {
         if (_ttsState.value.running) { onError("请等待当前章节配音生成完成后再删除"); return }
@@ -651,6 +661,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         deletingBookId = bookId
         viewModelScope.launch {
             runCatching {
+                val book = repository.getBook(bookId) ?: error("找不到这本小说")
                 val chapterIds = repository.getChapters(bookId).map { it.id }
                 audioPlayer.stop()
                 withContext(Dispatchers.IO) {
@@ -658,6 +669,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     try {
                         repository.deleteBook(bookId)
                         ttsEngine.commitAudioDeletion(trash)
+                        deleteManagedCover(book)
                     } catch (error: Throwable) {
                         ttsEngine.restoreAudioDeletion(trash)
                         throw error

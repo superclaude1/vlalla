@@ -143,11 +143,7 @@ import com.storybrain.app.data.StoryCharacterEntity
 import com.storybrain.app.data.StoryRelationEntity
 import com.storybrain.app.data.TtsProfileIds
 import com.storybrain.app.data.TtsProfileVoicePoolEntity
-import com.storybrain.app.reader.ReaderParagraphs
 import com.storybrain.app.reader.ReaderPagerPolicy
-import com.storybrain.app.reader.ReaderPositionPolicy
-import com.storybrain.app.reader.ReaderPositionSamplingPolicy
-import com.storybrain.app.reader.ReaderViewport
 import com.storybrain.app.reader.ReaderPreferences
 import com.storybrain.app.reader.ReaderProgressPolicy
 import com.storybrain.app.reader.ReadingBlock
@@ -1196,31 +1192,6 @@ private fun DialogueBubble(
                     )
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun NarrationCard(
-    text: String,
-    fontSizeSp: Int,
-    lineHeightSp: Int,
-    onLongClick: () -> Unit
-) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Surface(
-            modifier = Modifier.widthIn(max = 340.dp).combinedClickable(onClick = {}, onLongClick = onLongClick),
-            shape = RoundedCornerShape(12.dp),
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .58f)
-        ) {
-            Text(
-                text,
-                Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    fontSize = fontSizeSp.sp,
-                    lineHeight = lineHeightSp.sp
-                )
-            )
         }
     }
 }

@@ -32,13 +32,15 @@ import org.json.JSONArray
         ChapterCharacterMentionEntity::class,
         TaskRunEntity::class,
         TaskEventEntity::class,
+        AnalysisBatchEntity::class,
+        DialogueAnnotationEntity::class,
         LlmApiProfileEntity::class,
         LlmModelEntity::class,
         ReadingPreferenceEntity::class,
         ReadingPositionEntity::class,
         ReadingMarkEntity::class
     ],
-    version = 12,
+    version = 13,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -49,7 +51,7 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "story-brain.db"
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12)
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
             .addCallback(ANALYSIS_RECOVERY_CALLBACK)
             .build()
 
@@ -73,7 +75,7 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL(
                         """UPDATE task_runs SET status = 'FAILED',
                             finishedAt = COALESCE(finishedAt, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
-                            WHERE taskType = 'ANALYSIS' AND status = 'RUNNING'""".trimIndent()
+                            WHERE taskType IN ('ANALYSIS', 'ANALYSIS_VERIFY', 'JSON_REPAIR') AND status = 'RUNNING'""".trimIndent()
                     )
                     db.setTransactionSuccessful()
                 } finally {
@@ -316,6 +318,27 @@ abstract class AppDatabase : RoomDatabase() {
         internal val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `books` ADD COLUMN `coverPath` TEXT")
+            }
+        }
+
+        /** v12 → v13: persisted analysis batches and source-validated dialogue annotations. */
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `finishedAt` INTEGER")
+                db.execSQL("ALTER TABLE `task_events` ADD COLUMN `durationMs` INTEGER")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `analysis_batches` (`runId` TEXT NOT NULL, `batchIndex` INTEGER NOT NULL, `bookId` TEXT NOT NULL, `chapterIdsJson` TEXT NOT NULL, `status` TEXT NOT NULL, `attempt` INTEGER NOT NULL, `error` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`runId`, `batchIndex`))"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_analysis_batches_bookId` ON `analysis_batches` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_analysis_batches_status` ON `analysis_batches` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_analysis_batches_updatedAt` ON `analysis_batches` (`updatedAt`)")
+                db.execSQL(
+                    """CREATE TABLE IF NOT EXISTS `dialogue_annotations` (`id` TEXT NOT NULL, `bookId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `chapterIndex` INTEGER NOT NULL, `speakerCharacterId` TEXT, `speakerName` TEXT, `dialogueText` TEXT NOT NULL, `sourceText` TEXT NOT NULL, `speakerEvidence` TEXT NOT NULL, `sourceStart` INTEGER NOT NULL, `sourceEnd` INTEGER NOT NULL, `confidence` REAL NOT NULL, `validationStatus` TEXT NOT NULL, `validationIssuesJson` TEXT NOT NULL, `sourceHash` TEXT NOT NULL, `analysisVersion` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`bookId`) REFERENCES `books`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`chapterId`) REFERENCES `chapters`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(`speakerCharacterId`) REFERENCES `characters`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL)"""
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dialogue_annotations_bookId` ON `dialogue_annotations` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dialogue_annotations_chapterId` ON `dialogue_annotations` (`chapterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dialogue_annotations_speakerCharacterId` ON `dialogue_annotations` (`speakerCharacterId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dialogue_annotations_chapterId_sourceStart_sourceEnd` ON `dialogue_annotations` (`chapterId`, `sourceStart`, `sourceEnd`)")
             }
         }
     }

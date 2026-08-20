@@ -192,7 +192,15 @@ data class ChatMessageEntity(
 
 enum class TaskStatus { PENDING, QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED }
 
-enum class TaskRunType { ANALYSIS, TTS }
+enum class TaskRunType {
+    ANALYSIS,
+    ANALYSIS_VERIFY,
+    JSON_REPAIR,
+    TTS,
+    TTS_PREVIEW,
+    COVER_GENERATION,
+    IMAGE_API_TEST
+}
 
 enum class TaskRunStatus { RUNNING, FAILED, COMPLETED, CANCELLED }
 
@@ -228,10 +236,79 @@ data class TaskEventEntity(
     val attempt: Int = 1,
     val message: String,
     val createdAt: Long,
+    val finishedAt: Long? = null,
+    val durationMs: Long? = null,
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
     val totalTokens: Int? = null,
     val usageQuality: String? = null,
     val requestId: String? = null,
     val responseModel: String? = null
+)
+
+/** Persisted batch state lets analysis resume after process death without replaying completed batches. */
+@Entity(
+    tableName = "analysis_batches",
+    primaryKeys = ["runId", "batchIndex"],
+    indices = [Index("bookId"), Index("status"), Index("updatedAt")]
+)
+data class AnalysisBatchEntity(
+    val runId: String,
+    val batchIndex: Int,
+    val bookId: String,
+    val chapterIdsJson: String,
+    val status: String,
+    val attempt: Int = 1,
+    val error: String? = null,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+/** Validated source-level dialogue annotation shared by the reader and TTS. */
+@Entity(
+    tableName = "dialogue_annotations",
+    foreignKeys = [
+        ForeignKey(
+            entity = BookEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["bookId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = ChapterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["chapterId"],
+            onDelete = ForeignKey.CASCADE
+        ),
+        ForeignKey(
+            entity = StoryCharacterEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["speakerCharacterId"],
+            onDelete = ForeignKey.SET_NULL
+        )
+    ],
+    indices = [
+        Index("bookId"),
+        Index("chapterId"),
+        Index("speakerCharacterId"),
+        Index(value = ["chapterId", "sourceStart", "sourceEnd"])
+    ]
+)
+data class DialogueAnnotationEntity(
+    @PrimaryKey val id: String,
+    val bookId: String,
+    val chapterId: String,
+    val chapterIndex: Int,
+    val speakerCharacterId: String?,
+    val speakerName: String?,
+    val dialogueText: String,
+    val sourceText: String,
+    val speakerEvidence: String,
+    val sourceStart: Int,
+    val sourceEnd: Int,
+    val confidence: Float,
+    val validationStatus: String,
+    val validationIssuesJson: String = "[]",
+    val sourceHash: String,
+    val analysisVersion: Int,
+    val updatedAt: Long = System.currentTimeMillis()
 )

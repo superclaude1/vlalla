@@ -113,7 +113,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import android.graphics.BitmapFactory
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.geometry.Offset
@@ -132,6 +131,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.storybrain.app.data.BookEntity
+import com.storybrain.app.data.CoverBitmapLoader
+import com.storybrain.app.data.CoverImageInspector
 import com.storybrain.app.R
 import com.storybrain.app.data.ChapterEntity
 import com.storybrain.app.data.ChatMessageEntity
@@ -296,6 +297,12 @@ fun SearchScreen(viewModel: AppViewModel, onBack: () -> Unit, onOpenBook: (Strin
     }
 }
 
+private fun mimeFromCoverPath(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+    "png" -> "image/png"
+    "webp" -> "image/webp"
+    else -> "image/jpeg"
+}
+
 @Composable
 private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
     Row(
@@ -312,7 +319,11 @@ private fun BookCard(book: BookEntity, ttsCompleted: Int, onClick: () -> Unit) {
         ) {
             val coverBitmap = remember(book.coverPath) {
                 book.coverPath?.let { path ->
-                    runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+                    runCatching {
+                        val file = java.io.File(path)
+                        CoverImageInspector.inspect(file, mimeFromCoverPath(path))
+                        CoverBitmapLoader.decodeSampled(path, 320, 480)
+                    }.getOrNull()
                 }
             }
             if (coverBitmap != null) {
@@ -699,7 +710,9 @@ fun ReaderScreen(
         }?.id
     }
     val requestedIndex = ReaderPagerPolicy.startIndex(chapters, chapterId)
-    val currentIndex = requestedIndex ?: -1
+    var activeChapterIndex by rememberSaveable(bookId, chapterId) { mutableIntStateOf(requestedIndex ?: -1) }
+    var chromeVisible by rememberSaveable(bookId) { mutableStateOf(true) }
+    val currentIndex = activeChapterIndex.coerceIn(-1, chapters.lastIndex.coerceAtLeast(-1))
     val progressSummary = ReaderProgressPolicy.summarize(currentIndex, chapters.size)
     val knownSpeakers = remember(chapterMentionCharacters, characters) {
         ReaderSpeakerPolicy.buildKnownSpeakers(chapterMentionCharacters, characters)
@@ -901,9 +914,21 @@ fun ReaderScreen(
     }
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (chromeVisible) TopAppBar(
                 modifier = Modifier.height(ReactReferenceContract.topBarHeightDp.dp),
-                title = { Text(chapter?.title ?: "正在读取", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Box(
+                        Modifier.fillMaxWidth().padding(horizontal = 52.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            chapter?.let { "第${it.chapterIndex + 1}章 · ${it.title}" } ?: "正在读取",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } },
                 actions = {
                     if (!chapter?.ttsManifestPath.isNullOrBlank()) {
@@ -938,7 +963,7 @@ fun ReaderScreen(
             )
         },
         bottomBar = {
-            Surface(shadowElevation = 6.dp) {
+            if (chromeVisible) Surface(shadowElevation = 6.dp) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -976,7 +1001,9 @@ fun ReaderScreen(
             )
             LaunchedEffect(pagerState, requestedIndex, chapters) {
                 snapshotFlow { pagerState.settledPage }.collect { targetIndex ->
+                    activeChapterIndex = targetIndex
                     if (targetIndex != requestedIndex) openReaderChapter(targetIndex)
+                    chromeVisible = false
                 }
             }
             HorizontalPager(
@@ -985,9 +1012,17 @@ fun ReaderScreen(
                 userScrollEnabled = chapters.size > 1
             ) { page ->
                 val currentChapter = chapters.getOrNull(page)
-            key(currentChapter?.id, readerPreferences) {
-            val document = remember(currentChapter?.content, knownSpeakers) {
-                currentChapter?.content?.let { ReaderDocument.create(it, knownSpeakers) }
+                val dialogueAnnotations by viewModel.dialogueAnnotations(currentChapter?.id.orEmpty())
+                    .collectAsStateWithLifecycle(initialValue = emptyList())
+            key(currentChapter?.id, readerPreferences, dialogueAnnotations) {
+            val document = remember(currentChapter?.content, knownSpeakers, dialogueAnnotations) {
+                currentChapter?.content?.let { source ->
+                    val base = ReaderDocument.create(source, knownSpeakers)
+                    if (dialogueAnnotations.isEmpty()) base
+                    else base.copy(
+                        chatBlocks = ReaderDocument.createFromAnnotations(source, dialogueAnnotations)
+                    )
+                }
             }
             val textMeasurer = rememberTextMeasurer()
             val textStyle = remember(readerPreferences) {

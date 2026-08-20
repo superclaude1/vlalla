@@ -5,24 +5,37 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.net.URLEncoder
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
-/** Pollinations.ai cover generator with bounded, validated response handling. */
-class PollinationsCoverGenerator(private val context: Context) {
+/** Pollinations.ai cover generator with bounded and validated response handling. */
+class PollinationsCoverGenerator(
+    private val context: Context
+) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(90, TimeUnit.SECONDS)
         .build()
 
-    fun generate(bookId: String, title: String, seed: Int, onResult: (Result<File>) -> Unit) {
-        Thread {
-            val result = runCatching { generateBlocking(bookId, title, seed) }
-            onResult(result)
-        }.start()
+    fun generate(
+        bookId: String,
+        title: String,
+        seed: Int,
+        onResult: (Result<GeneratedCoverArtifact>) -> Unit
+    ) {
+        try {
+            executor.execute {
+                onResult(runCatching { generateBlocking(bookId, title, seed) })
+            }
+        } catch (error: Throwable) {
+            onResult(Result.failure(IllegalStateException("封面生成队列已满，请稍后重试", error)))
+        }
     }
 
-    private fun generateBlocking(bookId: String, title: String, seed: Int): File {
+    private fun generateBlocking(bookId: String, title: String, seed: Int): GeneratedCoverArtifact {
         val safeTitle = CoverGenerationPolicy.sanitizeTitle(title)
         val prompt = "elegant minimal novel book cover illustration for \"$safeTitle\", " +
             "fantasy literary style, muted colors, no text, no letters, no words"
@@ -35,17 +48,15 @@ class PollinationsCoverGenerator(private val context: Context) {
                 client.newCall(request).execute().use { response ->
                     check(response.isSuccessful) { "封面生成失败（HTTP ${response.code}）" }
                     val body = response.body ?: error("封面生成失败（空响应）")
+                    val contentType = response.header("Content-Type")
                     val declaredLength = body.contentLength()
-                    check(
-                        CoverGenerationPolicy.isAcceptableImage(response.header("Content-Type"), declaredLength)
-                    ) { "封面生成失败（响应类型或大小异常）" }
-                    val covers = File(context.filesDir, "covers").apply { mkdirs() }
-                    val extension = CoverGenerationPolicy.extensionFor(response.header("Content-Type"))
-                    val file = File(covers, CoverGenerationPolicy.fileName(bookId, extension))
-                    val temporary = File(covers, ".${file.name}.partial")
+                    check(CoverGenerationPolicy.isAcceptableImage(contentType, declaredLength)) {
+                        "封面生成失败（响应类型或大小异常）"
+                    }
+                    val temporary = CoverFileLifecycle.newTemporaryFile(context.filesDir, bookId)
                     try {
                         BufferedInputStream(body.byteStream()).use { input ->
-                            temporary.outputStream().use { output ->
+                            FileOutputStream(temporary).use { output ->
                                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                                 var total = 0L
                                 while (true) {
@@ -57,19 +68,16 @@ class PollinationsCoverGenerator(private val context: Context) {
                                     }
                                     output.write(buffer, 0, count)
                                 }
-                                check(
-                                    CoverGenerationPolicy.isAcceptableImage(
-                                        response.header("Content-Type"),
-                                        total
-                                    )
-                                ) { "封面生成失败（返回数据异常）" }
+                                output.flush()
+                                output.fd.sync()
+                                check(CoverGenerationPolicy.isAcceptableImage(contentType, total)) {
+                                    "封面生成失败（返回数据异常）"
+                                }
                             }
                         }
-                        if (!temporary.renameTo(file)) {
-                            temporary.delete()
-                            error("封面生成失败（无法保存文件）")
-                        }
-                        return file
+                        val inspected = CoverImageInspector.inspect(temporary, contentType)
+                        CoverBitmapValidator.validate(temporary, inspected)
+                        return GeneratedCoverArtifact(temporary, inspected.format)
                     } catch (error: Throwable) {
                         temporary.delete()
                         throw error
@@ -84,6 +92,16 @@ class PollinationsCoverGenerator(private val context: Context) {
     }
 
     companion object {
+        private val executor = ThreadPoolExecutor(
+            2,
+            2,
+            0L,
+            TimeUnit.MILLISECONDS,
+            ArrayBlockingQueue(16),
+            { task -> Thread(task, "cover-generator").apply { isDaemon = true } },
+            ThreadPoolExecutor.AbortPolicy()
+        )
+
         fun stableSeed(bookId: String): Int = CoverGenerationPolicy.stableSeed(bookId)
     }
 }

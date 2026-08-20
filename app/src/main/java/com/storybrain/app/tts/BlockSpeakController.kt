@@ -14,6 +14,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 单块点读：对话块点击 → 按说话人解析音色 → 合成（内容哈希缓存 + 引擎降级）→ 播放。
@@ -28,6 +30,7 @@ class BlockSpeakController(
     private val androidSystemProvider: TtsProvider = AndroidSystemTtsProvider(context)
 ) {
     private var player: MediaPlayer? = null
+    private val previewMutex = Mutex()
 
     /** 引擎健康记忆：网络失败后，后续点读跳过主引擎超时等待直接降级。 */
     @Volatile
@@ -178,6 +181,36 @@ class BlockSpeakController(
         player?.runCatching { stop() }
         player?.release()
         player = null
+    }
+
+    /** Preview uses a separate cache namespace and shares the same provider fallback path. */
+    suspend fun previewVoice(
+        profileId: String,
+        voiceId: String,
+        sampleText: String = "你好，这是当前音色的试听效果。",
+        onFinished: () -> Unit = {}
+    ): Result<Unit> = previewMutex.withLock {
+        runCatching {
+            stop()
+            val profile = repository.getTtsProfile(profileId) ?: error("找不到配音服务")
+            val resolved = ResolvedTtsVoice(
+                profile = profile,
+                voiceId = voiceId,
+                voiceName = voiceId,
+                explicit = true
+            )
+            val cache = File(context.filesDir, "tts/previews").apply { mkdirs() }
+            val cacheKey = sha256("$profileId|$voiceId|$sampleText|preview-v1")
+            val cached = cache.listFiles()?.firstOrNull {
+                it.name.startsWith("$cacheKey.") && it.length() > 0L
+            }
+            val artifact = cached?.let(::TtsAudioArtifact) ?: synthesizeWithFallback(
+                resolved,
+                sampleText,
+                File(cache, "$cacheKey.audio")
+            )
+            playArtifact(normalizeCacheFile(artifact, cacheKey, cache), onFinished)
+        }
     }
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")

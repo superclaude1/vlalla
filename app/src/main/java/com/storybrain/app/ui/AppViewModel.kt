@@ -17,7 +17,6 @@ import com.storybrain.app.data.ChatSessionEntity
 import com.storybrain.app.data.MemoryItemEntity
 import com.storybrain.app.data.MemoryType
 import com.storybrain.app.data.MemoryWithSelection
-import com.storybrain.app.data.BookEntity
 import com.storybrain.app.data.BookTtsSettingEntity
 import com.storybrain.app.data.BookNarratorBindingEntity
 import com.storybrain.app.data.CharacterVoiceBindingEntity
@@ -30,14 +29,16 @@ import com.storybrain.app.reader.ReaderPosition
 import com.storybrain.app.reader.ReaderPositionStore
 import com.storybrain.app.reader.ReaderPreferencesStore
 import com.storybrain.app.data.ReadingPositionEntity
-import com.storybrain.app.data.CoverGenerationPolicy
+import com.storybrain.app.data.CoverFileLifecycle
+import com.storybrain.app.data.CoverGenerationCoordinator
+import com.storybrain.app.data.CoverPublication
+import com.storybrain.app.data.ExistingBookCover
 import com.storybrain.app.data.PollinationsCoverGenerator
 import com.storybrain.app.data.ReadingMarkEntity
 import com.storybrain.app.data.ReadingMarkType
 import com.storybrain.app.data.ReaderTheme
 import com.storybrain.app.tts.BlockSpeakController
 import com.storybrain.app.tts.VoiceResolver
-import java.io.File
 import java.util.UUID
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.NetworkFailureClassifier
@@ -54,7 +55,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 
 data class ImportUiState(
     val loading: Boolean = false,
@@ -218,6 +226,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.ensureDefaultTtsProfiles()
             runCatching { ttsEngine.recoverAndCleanup(repository.getAllChapterIds().toSet()) }
+            runCatching {
+                CoverFileLifecycle.recoverAndCleanup(
+                    getApplication<Application>().filesDir,
+                    repository.getBooks().mapNotNull { it.coverPath }.toSet()
+                )
+            }
             repository.getBooks().forEach { book -> runCatching { repository.backfillAnalysisMemories(book.id) } }
         }
     }
@@ -228,6 +242,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun chapter(chapterId: String) = repository.observeChapter(chapterId)
     fun characters(bookId: String) = repository.observeCharacters(bookId)
     fun chapterCharacters(chapterId: String) = repository.observeChapterCharacters(chapterId)
+    fun dialogueAnnotations(chapterId: String) = repository.observeDialogueAnnotations(chapterId)
     fun relations(bookId: String) = repository.observeRelations(bookId)
     fun plotNodes(bookId: String) = repository.observePlotNodes(bookId)
     fun chatMessages(sessionId: String) = repository.observeChatMessages(sessionId)
@@ -245,6 +260,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun clearTaskEvents() {
         viewModelScope.launch { repository.clearTaskEvents() }
     }
+    fun enqueueAnalysis(bookId: String) {
+        val request = OneTimeWorkRequestBuilder<com.storybrain.app.data.AnalysisWorker>()
+            .setInputData(workDataOf(com.storybrain.app.data.AnalysisWorker.KEY_BOOK_ID to bookId))
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build()
+            )
+            .build()
+        WorkManager.getInstance(getApplication<Application>()).enqueueUniqueWork(
+            "analysis:$bookId",
+            ExistingWorkPolicy.KEEP,
+            request
+        )
+    }
+
     fun setBookPrimaryProfile(bookId: String, profileId: String?) {
         viewModelScope.launch { repository.setBookPrimaryProfile(bookId, profileId) }
     }
@@ -468,6 +499,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // ---- 书籍封面（Pollinations.ai）----
 
+    private val coverCoordinator = CoverGenerationCoordinator()
     private val coverGenerator by lazy { PollinationsCoverGenerator(application) }
 
     private val _coverError = MutableStateFlow<String?>(null)
@@ -475,15 +507,41 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 生成/重新生成书籍封面。默认 seed 由 bookId 稳定派生；regenerate 换随机 seed。 */
     fun generateBookCover(bookId: String, title: String, regenerate: Boolean = false) {
+        if (coverCoordinator.isDeleting(bookId)) return
         _coverError.value = null
+        val generationId = coverCoordinator.beginGeneration(bookId) ?: return
         val seed = if (regenerate) (System.currentTimeMillis() % 100_000).toInt()
         else PollinationsCoverGenerator.stableSeed(bookId)
         coverGenerator.generate(bookId, title, seed) { result ->
-            result.onSuccess { file ->
-                viewModelScope.launch { repository.updateBookCover(bookId, file.absolutePath) }
+            result.onSuccess { artifact ->
+                viewModelScope.launch {
+                    try {
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            CoverPublication.publishIfCurrent(
+                                filesDir = getApplication<Application>().filesDir,
+                                bookId = bookId,
+                                generationId = generationId,
+                                artifact = artifact,
+                                coordinator = coverCoordinator,
+                                readBook = {
+                                    val book = repository.getBook(bookId)
+                                    ExistingBookCover(book != null, book?.coverPath)
+                                },
+                                updatePath = { path -> repository.updateBookCover(bookId, path) }
+                            )
+                        }
+                    } catch (error: Throwable) {
+                        withContext(Dispatchers.IO) { artifact.temporary.delete() }
+                        _coverError.value = error.message ?: "封面生成失败"
+                    } finally {
+                        coverCoordinator.finishGeneration(bookId, generationId)
+                    }
+                }
             }
             result.onFailure { error ->
-                viewModelScope.launch { _coverError.value = error.message ?: "封面生成失败" }
+                if (coverCoordinator.finishGeneration(bookId, generationId)) {
+                    viewModelScope.launch { _coverError.value = error.message ?: "封面生成失败" }
+                }
             }
         }
     }
@@ -648,38 +706,48 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _analysisState.value = _analysisState.value.asFailure(error.message ?: "LLM 分析失败", analysisFailure)
     }
 
-    private fun deleteManagedCover(book: BookEntity) {
-        val filesDir = getApplication<Application>().filesDir
-        book.coverPath?.takeIf { CoverGenerationPolicy.isManagedPath(filesDir, it) }
-            ?.let { File(it).delete() }
-    }
-
     @Synchronized
     fun deleteBook(bookId: String, onComplete: () -> Unit = {}, onError: (String) -> Unit = {}) {
         if (_ttsState.value.running) { onError("请等待当前章节配音生成完成后再删除"); return }
         if (deletingBookId != null) return
         deletingBookId = bookId
+        coverCoordinator.markDeleting(bookId)
         viewModelScope.launch {
             runCatching {
-                val book = repository.getBook(bookId) ?: error("找不到这本小说")
+                repository.getBook(bookId) ?: error("找不到这本小说")
                 val chapterIds = repository.getChapters(bookId).map { it.id }
                 audioPlayer.stop()
-                withContext(Dispatchers.IO) {
-                    val trash = ttsEngine.stageAudioDeletion(bookId, chapterIds)
-                    try {
-                        repository.deleteBook(bookId)
-                        ttsEngine.commitAudioDeletion(trash)
-                        deleteManagedCover(book)
-                    } catch (error: Throwable) {
-                        ttsEngine.restoreAudioDeletion(trash)
-                        throw error
+                withContext(NonCancellable + Dispatchers.IO) {
+                    coverCoordinator.withBookLock(bookId) {
+                        val currentBook = repository.getBook(bookId) ?: error("找不到这本小说")
+                        val ttsStage = ttsEngine.stageAudioDeletion(bookId, chapterIds)
+                        val coverStage = runCatching {
+                            CoverFileLifecycle.stageDeletion(
+                                getApplication<Application>().filesDir,
+                                currentBook.coverPath
+                            )
+                        }.getOrElse { error ->
+                            ttsEngine.restoreAudioDeletion(ttsStage)
+                            throw error
+                        }
+                        try {
+                            repository.deleteBook(bookId)
+                        } catch (error: Throwable) {
+                            coverStage?.let(CoverFileLifecycle::restoreDeletion)
+                            ttsEngine.restoreAudioDeletion(ttsStage)
+                            throw error
+                        }
+                        ttsEngine.commitAudioDeletion(ttsStage)
+                        runCatching { CoverFileLifecycle.commitDeletion(coverStage) }
                     }
                 }
             }.onSuccess {
+                coverCoordinator.clearDeleting(bookId)
                 deletingBookId = null
                 _ttsState.value = TtsUiState()
                 onComplete()
             }.onFailure { error ->
+                coverCoordinator.clearDeleting(bookId)
                 deletingBookId = null
                 onError(error.message ?: "删除小说失败")
             }

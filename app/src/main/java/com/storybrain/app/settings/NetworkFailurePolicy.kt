@@ -31,7 +31,9 @@ data class NetworkFailure(
     val requestId: String? = null,
     val stage: RequestStage,
     val payloadBytes: Int = 0,
-    val attempt: Int = 1
+    val attempt: Int = 1,
+    /** Short provider diagnostic only; never store a full response body. */
+    val providerMessage: String? = null
 )
 
 /** Pure classification rules. It never logs or includes request/response contents. */
@@ -86,8 +88,23 @@ object NetworkFailureClassifier {
             retryAfterMillis = retryAfter,
             requestId = requestId,
             stage = stage,
-            payloadBytes = payloadBytes
+            payloadBytes = payloadBytes,
+            providerMessage = safeProviderMessage(body)
         )
+    }
+
+    /** Only explicit response-format errors should trigger JSON-mode fallback. */
+    fun responseFormatUnsupported(failure: NetworkFailure): Boolean {
+        if (failure.statusCode != 400) return false
+        val detail = failure.providerMessage?.lowercase().orEmpty()
+        return listOf(
+            "response_format",
+            "json_object",
+            "json_schema",
+            "unsupported",
+            "not supported",
+            "unknown parameter"
+        ).any(detail::contains)
     }
 
     fun classifyMalformedJson(
@@ -110,6 +127,14 @@ object NetworkFailureClassifier {
             ChronoUnit.MILLIS.between(ZonedDateTime.now(), ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME)).coerceAtLeast(0L)
         }.getOrNull()
     }
+
+    private fun safeProviderMessage(body: String): String? = runCatching {
+        val root = org.json.JSONObject(body)
+        val message = root.optJSONObject("error")?.optString("message")
+            ?.takeIf { it.isNotBlank() }
+            ?: root.optString("message").takeIf { it.isNotBlank() }
+        message?.replace(Regex("\\s+"), " ")?.take(300)
+    }.getOrNull()
 
     private fun NetworkFailureKind.message(): String = when (this) {
         NetworkFailureKind.CONNECTION_ABORTED -> "网络连接被中止，请检查网络后重试。"

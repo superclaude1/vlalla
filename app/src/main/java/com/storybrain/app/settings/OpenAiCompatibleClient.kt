@@ -22,6 +22,21 @@ import org.json.JSONObject
 
 data class LlmMessage(val role: String, val content: String)
 
+/** Capability levels understood by OpenAI-compatible gateways. */
+enum class ResponseFormatMode {
+    NONE,
+    JSON_OBJECT,
+    JSON_SCHEMA
+}
+
+data class ChatRequestOptions(
+    val responseFormat: ResponseFormatMode = ResponseFormatMode.NONE,
+    /** Null means the parameter is omitted for reasoning models/gateways that reject it. */
+    val temperature: Double? = null,
+    val schemaName: String? = null,
+    val schema: JSONObject? = null
+)
+
 enum class UsageQuality { COMPLETE, PARTIAL, MISSING }
 
 data class ChatCompletionUsage(
@@ -52,7 +67,9 @@ data class ChatCompletionResult(
     val content: String,
     val usage: ChatCompletionUsage,
     val responseModel: String?,
-    val requestId: String
+    val requestId: String,
+    val finishReason: String? = null,
+    val contentKind: String = "message.content.string"
 )
 
 class OpenAiCompatibleClient(
@@ -117,8 +134,25 @@ class OpenAiCompatibleClient(
         messages: List<LlmMessage>,
         temperature: Double = 0.2,
         jsonMode: Boolean = false
+    ): ChatCompletionResult = chatCompletionResult(
+        baseUrl = baseUrl,
+        apiKey = apiKey,
+        model = model,
+        messages = messages,
+        options = ChatRequestOptions(
+            responseFormat = if (jsonMode) ResponseFormatMode.JSON_OBJECT else ResponseFormatMode.NONE,
+            temperature = temperature
+        )
+    )
+
+    suspend fun chatCompletionResult(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        messages: List<LlmMessage>,
+        options: ChatRequestOptions
     ): ChatCompletionResult = executeWithRetry(
-        createRequest(baseUrl, apiKey, model, messages, temperature, jsonMode)
+        createRequest(baseUrl, apiKey, model, messages, options)
     )
 
     fun chatCompletionResultBlocking(
@@ -137,18 +171,38 @@ class OpenAiCompatibleClient(
         apiKey: String,
         model: String,
         messages: List<LlmMessage>,
-        temperature: Double,
-        jsonMode: Boolean
+        options: ChatRequestOptions
     ): CompletionRequest {
         val payload = JSONObject()
             .put("model", model)
-            .put("temperature", temperature)
             .put("messages", JSONArray().apply {
                 messages.forEach { message ->
                     put(JSONObject().put("role", message.role).put("content", message.content))
                 }
             })
-        if (jsonMode) payload.put("response_format", JSONObject().put("type", "json_object"))
+        options.temperature?.let { payload.put("temperature", it) }
+        when (options.responseFormat) {
+            ResponseFormatMode.NONE -> Unit
+            ResponseFormatMode.JSON_OBJECT -> payload.put(
+                "response_format", JSONObject().put("type", "json_object")
+            )
+            ResponseFormatMode.JSON_SCHEMA -> {
+                require(!options.schemaName.isNullOrBlank()) { "JSON Schema 缺少名称" }
+                require(options.schema != null) { "JSON Schema 缺少定义" }
+                payload.put(
+                    "response_format",
+                    JSONObject()
+                        .put("type", "json_schema")
+                        .put(
+                            "json_schema",
+                            JSONObject()
+                                .put("name", options.schemaName)
+                                .put("strict", true)
+                                .put("schema", options.schema)
+                        )
+                )
+            }
+        }
         val payloadText = payload.toString()
         val requestId = UUID.randomUUID().toString()
         val request = Request.Builder()
@@ -224,11 +278,11 @@ class OpenAiCompatibleClient(
         try {
             val root = JSONObject(body)
             val usageObject = root.optJSONObject("usage")
+            val choice = root.getJSONArray("choices").getJSONObject(0)
+            val (content, contentKind) = extractAssistantContent(choice)
+            if (content.isBlank()) throw JSONException("empty assistant content")
             return ChatCompletionResult(
-                content = root.getJSONArray("choices")
-                    .getJSONObject(0)
-                    .getJSONObject("message")
-                    .getString("content"),
+                content = content,
                 usage = ChatCompletionUsage.from(
                     prompt = usageObject?.intOrNull("prompt_tokens"),
                     completion = usageObject?.intOrNull("completion_tokens"),
@@ -237,7 +291,9 @@ class OpenAiCompatibleClient(
                 responseModel = root.optString("model").takeIf { it.isNotBlank() },
                 requestId = root.optString("id").takeIf { it.isNotBlank() }
                     ?: response.header("x-request-id")?.takeIf { it.isNotBlank() }
-                    ?: request.requestId
+                    ?: request.requestId,
+                finishReason = choice.optString("finish_reason").takeIf { it.isNotBlank() },
+                contentKind = contentKind
             )
         } catch (error: JSONException) {
             throw LlmDomainException(
@@ -248,6 +304,35 @@ class OpenAiCompatibleClient(
                 error
             )
         }
+    }
+
+    private fun extractAssistantContent(choice: JSONObject): Pair<String, String> {
+        val message = choice.optJSONObject("message")
+        if (message != null) {
+            when (val content = message.opt("content")) {
+                is String -> return content to "message.content.string"
+                is JSONArray -> {
+                    val text = buildString {
+                        for (index in 0 until content.length()) {
+                            val part = content.optJSONObject(index) ?: continue
+                            append(part.optString("text"))
+                        }
+                    }
+                    if (text.isNotBlank()) return text to "message.content.parts"
+                }
+            }
+            val toolArguments = message.optJSONArray("tool_calls")?.let { calls ->
+                (0 until calls.length()).asSequence()
+                    .mapNotNull { calls.optJSONObject(it) }
+                    .mapNotNull { it.optJSONObject("function")?.optString("arguments") }
+                    .firstOrNull { it.isNotBlank() }
+            }
+            if (!toolArguments.isNullOrBlank()) return toolArguments to "tool_calls.arguments"
+        }
+        choice.optString("text").takeIf { it.isNotBlank() }?.let {
+            return it to "choice.text"
+        }
+        return "" to "empty"
     }
 
     private fun openConnection(

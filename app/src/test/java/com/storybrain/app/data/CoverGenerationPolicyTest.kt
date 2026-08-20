@@ -49,6 +49,16 @@ class CoverGenerationPolicyTest {
     }
 
     @Test
+    fun publishedFileNamesAreUniqueAcrossGenerationsOfOneBook() {
+        val first = CoverGenerationPolicy.fileName("book", "jpg", "generation-1")
+        val second = CoverGenerationPolicy.fileName("book", "jpg", "generation-2")
+
+        assertFalse(first == second)
+        assertFalse(first.contains(File.separator))
+        assertFalse(second.contains(File.separator))
+    }
+
+    @Test
     fun onlyFilesInsideManagedCoverDirectoryCanBeDeleted() {
         val filesDir = File("/data/user/0/com.storybrain.app/files")
         val managed = File(filesDir, "covers/a.jpg").path

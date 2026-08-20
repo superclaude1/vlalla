@@ -223,7 +223,16 @@ fun SettingsScreen(page: SettingsPage, onBack: () -> Unit, profileId: String? = 
                         if (state.voicePool.isEmpty()) item { Text("暂无音色") }
                         items(state.voicePool, key = { "${it.profileId}-${it.voiceId}-${it.role}" }) { voice ->
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                                Column(Modifier.fillMaxWidth().padding(16.dp)) { Text(voice.voiceName); Text("${roleLabel(voice.role)} · ${voice.voiceId}", style = MaterialTheme.typography.labelSmall) }
+                                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                                    Text(voice.voiceName)
+                                    Text("${roleLabel(voice.role)} · ${voice.voiceId}", style = MaterialTheme.typography.labelSmall)
+                                    OutlinedButton(
+                                        onClick = { viewModel.previewVoice(voice.profileId, voice.voiceId) },
+                                        enabled = state.previewingVoiceId == null || state.previewingVoiceId == voice.voiceId
+                                    ) {
+                                        Text(if (state.previewingVoiceId == voice.voiceId) "试听中" else "试听")
+                                    }
+                                }
                             }
                         }
                         if (profile?.kind == TtsProviderKind.FISH_AUDIO.name) {

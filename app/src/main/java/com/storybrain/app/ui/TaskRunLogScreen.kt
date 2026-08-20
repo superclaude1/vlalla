@@ -28,6 +28,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.storybrain.app.data.TaskEventEntity
+import java.text.DateFormat
+import java.util.Date
 
 @Composable
 fun TaskRunLogScreen(
@@ -55,6 +57,7 @@ private fun TaskEventCard(event: TaskEventEntity, onCopy: () -> Unit) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
             Text("${event.eventType} · ${event.taskType} · ${event.stage}")
             Text(event.message)
+            Text("时间：${formatTaskTime(event.createdAt)} · 耗时：${event.durationMs?.let(::formatDuration) ?: "未结束"}")
             Text("状态码：${event.statusCode ?: "无"} · 尝试：${event.attempt}")
             if (event.eventType == "USAGE") {
                 Text("质量：${event.usageQuality ?: "MISSING"}")
@@ -65,4 +68,13 @@ private fun TaskEventCard(event: TaskEventEntity, onCopy: () -> Unit) {
             Button(onClick = onCopy) { Text("复制") }
         }
     }
+}
+
+private fun formatTaskTime(value: Long): String =
+    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(Date(value))
+
+private fun formatDuration(value: Long): String = when {
+    value < 1_000L -> "${value}ms"
+    value < 60_000L -> "${value / 1_000.0}s"
+    else -> "${value / 60_000}m ${(value % 60_000) / 1_000}s"
 }

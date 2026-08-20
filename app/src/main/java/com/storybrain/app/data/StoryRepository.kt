@@ -33,6 +33,7 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeBookTtsSetting(bookId: String) = dao.observeBookTtsSetting(bookId)
     fun observeActiveCharacterVoiceBindings(bookId: String) = dao.observeActiveCharacterVoiceBindings(bookId)
     fun observeTaskEvents() = dao.observeTaskEvents()
+    fun observeDialogueAnnotations(chapterId: String) = dao.observeDialogueAnnotations(chapterId)
     fun observeLlmApiProfiles() = dao.observeLlmApiProfiles()
     fun observeLlmModels() = dao.observeLlmModels()
 
@@ -54,6 +55,8 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun getLlmApiProfiles() = dao.getLlmApiProfiles()
     suspend fun getLlmApiProfile(profileId: String) = dao.getLlmApiProfile(profileId)
     suspend fun getLlmModels() = dao.getLlmModels()
+    suspend fun getDialogueAnnotations(chapterId: String) = dao.getDialogueAnnotations(chapterId)
+    suspend fun getAnalysisBatches(bookId: String) = dao.getAnalysisBatches(bookId)
 
     suspend fun saveLlmApiProfile(profile: LlmApiProfileEntity) = dao.upsertLlmApiProfile(
         profile.copy(
@@ -167,6 +170,10 @@ class StoryRepository(private val database: AppDatabase) {
     suspend fun finishTaskRun(runId: String, status: TaskRunStatus) =
         dao.finishTaskRun(runId, status.name, System.currentTimeMillis())
 
+    suspend fun upsertAnalysisBatch(batch: AnalysisBatchEntity) = dao.upsertAnalysisBatch(
+        batch.copy(updatedAt = System.currentTimeMillis())
+    )
+
     suspend fun recordTaskFailure(
         runId: String,
         taskType: TaskRunType,
@@ -208,6 +215,11 @@ class StoryRepository(private val database: AppDatabase) {
             totalTokens = usage.totalTokens, usageQuality = usage.quality.name,
             requestId = requestId, responseModel = responseModel
         ))
+    }
+
+    suspend fun finishTaskEvent(eventId: String, createdAt: Long) {
+        val finishedAt = System.currentTimeMillis()
+        dao.finishTaskEvent(eventId, finishedAt, (finishedAt - createdAt).coerceAtLeast(0L))
     }
 
     suspend fun clearTaskEvents() = database.withTransaction {
@@ -673,6 +685,8 @@ class StoryRepository(private val database: AppDatabase) {
     }
 
     suspend fun deleteBook(bookId: String) = database.withTransaction {
+        dao.deleteTaskRunsForTarget(bookId)
+        dao.deleteAnalysisBatches(bookId)
         dao.deleteMemoryFtsForBook(bookId)
         dao.deleteRelationsForBook(bookId)
         dao.deletePlotNodesForBook(bookId)
@@ -698,6 +712,14 @@ class StoryRepository(private val database: AppDatabase) {
     fun observeChapterReadingMarks(chapterId: String) = dao.observeChapterReadingMarks(chapterId)
 
     suspend fun upsertReadingMark(mark: ReadingMarkEntity) = dao.upsertReadingMark(mark)
+
+    suspend fun replaceDialogueAnnotations(
+        chapterIds: List<String>,
+        items: List<DialogueAnnotationEntity>
+    ) = database.withTransaction {
+        if (chapterIds.isNotEmpty()) dao.deleteDialogueAnnotations(chapterIds)
+        if (items.isNotEmpty()) dao.upsertDialogueAnnotations(items)
+    }
 
     suspend fun deleteReadingMark(markId: String) = dao.deleteReadingMark(markId)
 

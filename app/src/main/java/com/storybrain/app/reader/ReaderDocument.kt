@@ -1,5 +1,6 @@
 package com.storybrain.app.reader
 
+import com.storybrain.app.data.DialogueAnnotationEntity
 import com.storybrain.app.ui.ReaderMode
 
 /**
@@ -29,6 +30,54 @@ data class ReaderDocument(
     }
 
     companion object {
+        /** Builds the same block model from locally validated source annotations. */
+        fun createFromAnnotations(
+            source: String,
+            annotations: List<DialogueAnnotationEntity>
+        ): List<ReadingBlock> {
+            val sorted = annotations
+                .filter { it.sourceStart >= 0 && it.sourceEnd <= source.length && it.sourceStart < it.sourceEnd }
+                .sortedWith(compareBy<DialogueAnnotationEntity> { it.sourceStart }.thenBy { it.sourceEnd })
+            if (sorted.isEmpty()) return emptyList()
+
+            val blocks = mutableListOf<ReadingBlock>()
+            var cursor = 0
+            fun appendNarration(start: Int, end: Int) {
+                if (end <= start) return
+                val raw = source.substring(start, end)
+                val leading = raw.indexOfFirst { !it.isWhitespace() }
+                val trailing = raw.indexOfLast { !it.isWhitespace() }
+                if (leading >= 0 && trailing >= leading) {
+                    blocks += ReadingBlock.Narration(
+                        text = raw.substring(leading, trailing + 1),
+                        sourceStart = start + leading,
+                        sourceEnd = start + trailing + 1
+                    )
+                }
+            }
+
+            sorted.forEach { annotation ->
+                if (annotation.sourceStart < cursor) return@forEach
+                appendNarration(cursor, annotation.sourceStart)
+                val dialogueOffset = annotation.sourceText.indexOf(annotation.dialogueText)
+                val dialogueStart = if (dialogueOffset >= 0) {
+                    annotation.sourceStart + dialogueOffset
+                } else {
+                    annotation.sourceStart
+                }
+                blocks += ReadingBlock.Dialogue(
+                    speaker = annotation.speakerName ?: "未识别角色",
+                    text = annotation.dialogueText,
+                    sourceStart = dialogueStart,
+                    sourceEnd = (dialogueStart + annotation.dialogueText.length)
+                        .coerceAtMost(annotation.sourceEnd)
+                )
+                cursor = annotation.sourceEnd
+            }
+            appendNarration(cursor, source.length)
+            return blocks.filter { it.text.isNotBlank() }
+        }
+
         fun create(source: String, knownSpeakers: Map<String, String> = emptyMap()): ReaderDocument {
             val original = Regex("[^\\r\\n]+").findAll(source).mapNotNull { match ->
                 val raw = match.value

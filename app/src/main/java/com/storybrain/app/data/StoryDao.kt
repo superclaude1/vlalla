@@ -382,6 +382,9 @@ interface StoryDao {
     @Query("UPDATE task_runs SET status = :status, finishedAt = :finishedAt WHERE id = :runId")
     suspend fun finishTaskRun(runId: String, status: String, finishedAt: Long)
 
+    @Query("UPDATE task_events SET finishedAt = :finishedAt, durationMs = :durationMs WHERE id = :eventId")
+    suspend fun finishTaskEvent(eventId: String, finishedAt: Long, durationMs: Long)
+
     @Query("SELECT * FROM task_events ORDER BY createdAt DESC, id DESC")
     fun observeTaskEvents(): Flow<List<TaskEventEntity>>
 
@@ -390,6 +393,30 @@ interface StoryDao {
 
     @Query("DELETE FROM task_runs")
     suspend fun clearTaskRuns()
+
+    @Upsert
+    suspend fun upsertAnalysisBatch(batch: AnalysisBatchEntity)
+
+    @Query("SELECT * FROM analysis_batches WHERE bookId = :bookId ORDER BY updatedAt DESC, batchIndex")
+    suspend fun getAnalysisBatches(bookId: String): List<AnalysisBatchEntity>
+
+    @Query("DELETE FROM analysis_batches WHERE bookId = :bookId")
+    suspend fun deleteAnalysisBatches(bookId: String)
+
+    @Upsert
+    suspend fun upsertDialogueAnnotations(items: List<DialogueAnnotationEntity>)
+
+    @Query("SELECT * FROM dialogue_annotations WHERE chapterId = :chapterId ORDER BY sourceStart, sourceEnd")
+    fun observeDialogueAnnotations(chapterId: String): Flow<List<DialogueAnnotationEntity>>
+
+    @Query("SELECT * FROM dialogue_annotations WHERE chapterId = :chapterId ORDER BY sourceStart, sourceEnd")
+    suspend fun getDialogueAnnotations(chapterId: String): List<DialogueAnnotationEntity>
+
+    @Query("DELETE FROM dialogue_annotations WHERE chapterId IN (:chapterIds)")
+    suspend fun deleteDialogueAnnotations(chapterIds: List<String>)
+
+    @Query("DELETE FROM task_runs WHERE targetId = :targetId")
+    suspend fun deleteTaskRunsForTarget(targetId: String)
 
     @Query("DELETE FROM books WHERE id = :bookId")
     suspend fun deleteBook(bookId: String)
@@ -437,5 +464,5 @@ interface StoryDao {
     suspend fun deleteReadingMark(markId: String)
 
     @Query("UPDATE books SET coverPath = :path WHERE id = :bookId")
-    suspend fun updateBookCover(bookId: String, path: String)
+    suspend fun updateBookCover(bookId: String, path: String): Int
 }

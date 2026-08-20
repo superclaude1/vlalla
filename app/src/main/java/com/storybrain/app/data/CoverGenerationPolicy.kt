@@ -40,8 +40,10 @@ object CoverGenerationPolicy {
         else -> "jpg"
     }
 
-    fun fileName(bookId: String, extension: String = "jpg"): String =
-        sha256(bookId).take(32) + "." + extension.filter(Char::isLetterOrDigit).lowercase(Locale.ROOT)
+    fun fileName(bookId: String, extension: String = "jpg", generationId: String? = null): String {
+        val identity = if (generationId == null) bookId else "$bookId\u0000$generationId"
+        return sha256(identity).take(32) + "." + extension.filter(Char::isLetterOrDigit).lowercase(Locale.ROOT)
+    }
 
     fun isManagedPath(filesDir: File, path: String): Boolean = runCatching {
         val coversDir = File(filesDir, "covers").canonicalFile

@@ -41,7 +41,7 @@ class ReaderFunctionParityContractTest {
         assertTrue(viewModel.contains("fun saveReadingOffset("))
         assertTrue(viewModel.contains("fun observeReadingPosition(bookId: String)"))
         assertTrue(screens.contains("viewModel.observeReadingPosition(bookId)"))
-        assertTrue(screens.contains("key(currentChapter?.id, readerPreferences)"))
+        assertTrue(screens.contains("key(currentChapter?.id, readerPreferences, dialogueAnnotations)"))
         assertTrue(screens.contains("pages.indexOfFirst { storedOffset < it.endOffset }"))
         assertTrue(screens.contains("viewModel.saveReadingOffset("))
         assertTrue(screens.contains("snapshotFlow { pageState.settledPage }"))
@@ -57,7 +57,7 @@ class ReaderFunctionParityContractTest {
     @Test
     fun dialogueModeUsesParserAliasesAndRealDialogueBubble() {
         assertTrue(screens.contains("ReaderSpeakerPolicy.buildKnownSpeakers"))
-        assertTrue(screens.contains("ReaderDocument.create(it, knownSpeakers)"))
+        assertTrue(screens.contains("ReaderDocument.create(source, knownSpeakers)"))
         assertTrue(screens.contains("is ReadingBlock.Dialogue -> DialogueBubble("))
         assertTrue(screens.contains("characterId = chapterMentionCharacters.firstOrNull"))
     }

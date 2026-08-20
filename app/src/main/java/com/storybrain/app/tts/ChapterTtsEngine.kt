@@ -9,6 +9,7 @@ import com.storybrain.app.data.TtsProviderKind
 import com.storybrain.app.data.TtsScriptEntity
 import com.storybrain.app.data.TtsScriptSegmentEntity
 import com.storybrain.app.reader.ReadingBlock
+import com.storybrain.app.reader.ReaderDocument
 import com.storybrain.app.reader.TextToChatParser
 import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.TtsSettingsStore
@@ -53,7 +54,12 @@ class ChapterTtsEngine(
         val characters = repository.getCharacters(bookId)
         val aliases = aliases(characters)
         val characterByName = characters.associateBy { it.canonicalName }
-        val blocks = TextToChatParser.parse(chapter.content, aliases)
+        val annotations = repository.getDialogueAnnotations(chapterId)
+        val blocks = if (annotations.isNotEmpty()) {
+            ReaderDocument.createFromAnnotations(chapter.content, annotations)
+        } else {
+            TextToChatParser.parse(chapter.content, aliases)
+        }
         require(blocks.isNotEmpty()) { "本章没有可配音内容" }
         val sourceHash = sha256(chapter.content)
         val llmConfig = llmSettings.snapshot()

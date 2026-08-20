@@ -12,6 +12,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
@@ -79,6 +80,68 @@ class OpenAiCompatibleClientTest {
         assertEquals(UsageQuality.COMPLETE, ChatCompletionUsage.from(12, 7, 19).quality)
         assertEquals(UsageQuality.PARTIAL, ChatCompletionUsage.from(12, null, 19).quality)
         assertEquals(UsageQuality.MISSING, ChatCompletionUsage.from(null, null, null).quality)
+    }
+
+    @Test
+    fun optionsOmitTemperatureAndAcceptContentParts() = runBlocking {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        val serverCertificates = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val clientCertificates = HandshakeCertificates.Builder().addTrustedCertificate(certificate.certificate).build()
+        val server = MockWebServer().apply {
+            useHttps(serverCertificates.sslSocketFactory(), false)
+            enqueue(
+                MockResponse().setBody(
+                    JSONObject()
+                        .put("id", "req-parts")
+                        .put("model", "gateway-model")
+                        .put(
+                            "choices",
+                            org.json.JSONArray().put(
+                                JSONObject()
+                                    .put("finish_reason", "stop")
+                                    .put(
+                                        "message",
+                                        JSONObject().put(
+                                            "content",
+                                            org.json.JSONArray().put(
+                                                JSONObject()
+                                                    .put("type", "text")
+                                                    .put("text", "{\"ok\":true}")
+                                            )
+                                        )
+                                    )
+                            )
+                        )
+                        .toString()
+                ).setHeader("Content-Type", "application/json")
+            )
+            start()
+        }
+        val okHttpClient = OkHttpClient.Builder()
+            .sslSocketFactory(clientCertificates.sslSocketFactory(), clientCertificates.trustManager)
+            .build()
+        try {
+            val result = OpenAiCompatibleClient(okHttpClient).chatCompletionResult(
+                baseUrl = "https://localhost:${server.port}/v1",
+                apiKey = "test-key",
+                model = "test-model",
+                messages = listOf(LlmMessage("user", "hello")),
+                options = ChatRequestOptions(
+                    responseFormat = ResponseFormatMode.JSON_OBJECT,
+                    temperature = null
+                )
+            )
+            val request = server.takeRequest(5, TimeUnit.SECONDS)
+            val body = JSONObject(request!!.body.readUtf8())
+
+            assertTrue(!body.has("temperature"))
+            assertEquals("json_object", body.getJSONObject("response_format").getString("type"))
+            assertEquals("{\"ok\":true}", result.content)
+            assertEquals("message.content.parts", result.contentKind)
+            assertEquals("stop", result.finishReason)
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

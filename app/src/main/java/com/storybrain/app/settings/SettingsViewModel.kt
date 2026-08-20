@@ -14,6 +14,8 @@ import com.storybrain.app.tts.EdgeTtsClient
 import com.storybrain.app.tts.FishAudioClient
 import com.storybrain.app.tts.OpenAiTtsClient
 import com.storybrain.app.tts.TtsVoice
+import com.storybrain.app.tts.BlockSpeakController
+import com.storybrain.app.tts.VoiceResolver
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +54,7 @@ data class SettingsUiState(
     val ttsModels: List<String> = emptyList(),
     val voices: List<TtsVoice> = emptyList(),
     val voicePool: List<TtsProfileVoicePoolEntity> = emptyList(),
+    val previewingVoiceId: String? = null,
     val voiceQuery: String = "",
     val voiceTotal: Int = 0,
     val searchingOwnVoices: Boolean = true,
@@ -114,6 +117,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val repository = (application as StoryBrainApplication).repository
     private val llmStore = LlmSettingsStore(application, repository)
     private val ttsStore = TtsSettingsStore(application)
+    private val voicePreviewController by lazy {
+        BlockSpeakController(
+            context = application,
+            repository = repository,
+            settings = ttsStore,
+            resolver = VoiceResolver(repository, ttsStore)
+        )
+    }
     private val llmClient = OpenAiCompatibleClient()
     private val edgeClient = EdgeTtsClient()
     private val _state = MutableStateFlow(SettingsUiState())
@@ -450,6 +461,37 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun addManualVoice(voiceId: String, name: String, role: TtsVoiceRole) {
         if (voiceId.isBlank()) return
         addVoiceToPool(TtsVoice(voiceId.trim(), name.trim().ifBlank { voiceId.trim() }, source = "MANUAL"), role)
+    }
+
+    fun previewVoice(profileId: String, voiceId: String) {
+        val requestId = ++ttsRequestSequence
+        _state.value = _state.value.copy(previewingVoiceId = voiceId, ttsMessage = null, ttsIsError = false)
+        viewModelScope.launch {
+            runCatching {
+                voicePreviewController.previewVoice(profileId, voiceId) {
+                    if (requestId == ttsRequestSequence) {
+                        _state.value = _state.value.copy(
+                            previewingVoiceId = null,
+                            ttsMessage = "试听播放完成",
+                            ttsIsError = false
+                        )
+                    }
+                }.getOrThrow()
+            }.onSuccess {
+                if (requestId == ttsRequestSequence) {
+                    _state.value = _state.value.copy(ttsMessage = "试听播放中", ttsIsError = false)
+                }
+            }.onFailure { error ->
+                if (requestId == ttsRequestSequence) {
+                    _state.value = _state.value.copy(previewingVoiceId = null, ttsMessage = error.message ?: "音色试听失败", ttsIsError = true)
+                }
+            }
+        }
+    }
+
+    override fun onCleared() {
+        voicePreviewController.stop()
+        super.onCleared()
     }
 
     fun saveTts() {

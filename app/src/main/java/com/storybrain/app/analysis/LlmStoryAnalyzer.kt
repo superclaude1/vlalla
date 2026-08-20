@@ -8,6 +8,7 @@ import com.storybrain.app.data.StoryRepository
 import com.storybrain.app.data.TaskStatus
 import com.storybrain.app.data.TaskRunType
 import com.storybrain.app.data.TaskRunStatus
+import com.storybrain.app.data.AnalysisBatchEntity
 import com.storybrain.app.settings.LlmMessage
 import com.storybrain.app.settings.LlmDomainException
 import com.storybrain.app.settings.NetworkFailureClassifier
@@ -15,6 +16,9 @@ import com.storybrain.app.settings.LlmSettingsStore
 import com.storybrain.app.settings.LlmProfileSnapshot
 import com.storybrain.app.settings.OpenAiCompatibleClient
 import com.storybrain.app.settings.ChatCompletionUsage
+import com.storybrain.app.settings.ChatCompletionResult
+import com.storybrain.app.settings.ChatRequestOptions
+import com.storybrain.app.settings.ResponseFormatMode
 import com.storybrain.app.settings.UsageQuality
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -71,26 +75,55 @@ class LlmStoryAnalyzer(
                 currentCoroutineContext().ensureActive()
                 runningBatchIds = batch.map { it.id }
                 repository.updateAnalysisStatus(runningBatchIds, TaskStatus.RUNNING)
+                repository.upsertAnalysisBatch(
+                    AnalysisBatchEntity(
+                        runId = runId,
+                        batchIndex = batchIndex,
+                        bookId = bookId,
+                        chapterIdsJson = JSONArray(runningBatchIds).toString(),
+                        status = TaskStatus.RUNNING.name,
+                        attempt = 1
+                    )
+                )
                 val knownCharacters = repository.getCharacters(bookId)
                 val knownNodes = repository.getPlotNodes(bookId)
                 val messages = listOf(
                     LlmMessage("system", SYSTEM_PROMPT),
                     LlmMessage("user", buildUserPrompt(batch, knownCharacters, knownNodes))
                 )
-                val response = try {
-                    client.chatCompletionResult(profile.baseUrl, profile.apiKey, profile.modelId, messages, temperature = 0.1, jsonMode = true)
-                } catch (error: LlmDomainException) {
-                    val unsupportedJsonMode = error.failure.statusCode == 400
-                    if (!unsupportedJsonMode) throw error
-                    client.chatCompletionResult(profile.baseUrl, profile.apiKey, profile.modelId, messages, temperature = 0.1, jsonMode = false)
+                val response = requestStructuredAnalysis(profile, messages)
+                if (response.finishReason == "length") {
+                    throw IllegalArgumentException("LLM 输出被截断，请缩小分析批次后重试")
                 }
                 usage += AnalysisUsage(response.usage)
                 withContext(NonCancellable) {
                     repository.recordTaskUsage(runId, TaskRunType.ANALYSIS, bookId, batchIndex + 1, response.usage, response.requestId, response.responseModel)
                 }
-                val delta = parseDelta(bookId, response.content, knownCharacters, knownNodes, batch)
+                val raw = repairMalformedAnalysisIfNeeded(profile, response.content, batch)
+                val delta = parseDelta(bookId, raw, knownCharacters, knownNodes, batch)
+                val validatedDialogues = DialogueAnnotationParser.parseAndValidate(
+                    bookId = bookId,
+                    root = JSONObject(extractJsonObject(raw, REQUIRED_ANALYSIS_KEYS)),
+                    chapters = batch,
+                    characters = knownCharacters + delta.characters,
+                    analysisVersion = ANALYSIS_VERSION
+                )
+                require(validatedDialogues.issues.isEmpty()) {
+                    validatedDialogues.issues.joinToString("；")
+                }
                 completed = maxOf(completed, batch.maxOf { it.chapterIndex } + 1)
                 repository.saveAnalysisDelta(bookId, completed, batch.map { it.id }, delta.characters, delta.relations, delta.nodes, delta.mentions)
+                repository.replaceDialogueAnnotations(batch.map { it.id }, validatedDialogues.annotations)
+                repository.upsertAnalysisBatch(
+                    AnalysisBatchEntity(
+                        runId = runId,
+                        batchIndex = batchIndex,
+                        bookId = bookId,
+                        chapterIdsJson = JSONArray(batch.map { it.id }).toString(),
+                        status = TaskStatus.COMPLETED.name,
+                        attempt = 1
+                    )
+                )
                 runningBatchIds = emptyList()
                 calls++
                 onProgress(AnalysisProgress(completed, usage))
@@ -137,6 +170,83 @@ class LlmStoryAnalyzer(
         }
     }
 
+    private suspend fun requestStructuredAnalysis(
+        profile: LlmProfileSnapshot,
+        messages: List<LlmMessage>
+    ): ChatCompletionResult = try {
+        client.chatCompletionResult(
+            profile.baseUrl,
+            profile.apiKey,
+            profile.modelId,
+            messages,
+            ChatRequestOptions(
+                responseFormat = ResponseFormatMode.JSON_OBJECT,
+                temperature = null
+            )
+        )
+    } catch (error: LlmDomainException) {
+        if (!NetworkFailureClassifier.responseFormatUnsupported(error.failure)) throw error
+        client.chatCompletionResult(
+            profile.baseUrl,
+            profile.apiKey,
+            profile.modelId,
+            messages,
+            ChatRequestOptions(responseFormat = ResponseFormatMode.NONE, temperature = null)
+        )
+    }
+
+    private suspend fun repairMalformedAnalysisIfNeeded(
+        profile: LlmProfileSnapshot,
+        raw: String,
+        chapters: List<ChapterEntity>
+    ): String {
+        val expectedIndices = chapters.map { it.chapterIndex }.toSet()
+        if (runCatching { validateAnalysisShape(raw, expectedIndices) }.isSuccess) return raw
+
+        val repaired = client.chatCompletionResult(
+            profile.baseUrl,
+            profile.apiKey,
+            profile.modelId,
+            listOf(
+                LlmMessage(
+                    "system",
+                    "你是JSON修复器。只修复格式和字段类型，不补写事实；只输出完整JSON对象。"
+                ),
+                LlmMessage(
+                    "user",
+                    "修复下列输出。characters、relations、plotNodes必须是数组；章节编号仅可为${expectedIndices.sorted()}。\n$raw"
+                )
+            ),
+            ChatRequestOptions(responseFormat = ResponseFormatMode.NONE, temperature = null)
+        )
+        validateAnalysisShape(repaired.content, expectedIndices)
+        return repaired.content
+    }
+
+    private fun validateAnalysisShape(raw: String, expectedChapterIndices: Set<Int>) {
+        val jsonText = extractJsonObject(raw, REQUIRED_ANALYSIS_KEYS)
+        val root = JSONObject(jsonText)
+        REQUIRED_ANALYSIS_KEYS.forEach { key ->
+            require(root.optJSONArray(key) != null) { "$key 必须是数组" }
+        }
+        fun checkIndex(value: Int, field: String) {
+            require(value in expectedChapterIndices) { "$field 引用了当前批次之外的章节" }
+        }
+        root.optJSONArray("characters").objects().forEach { character ->
+            character.optJSONArray("chapterMentions").objects().forEach { mention ->
+                checkIndex(mention.optInt("chapterIndex", Int.MIN_VALUE), "chapterMentions.chapterIndex")
+            }
+        }
+        root.optJSONArray("relations").objects().forEach { relation ->
+            checkIndex(relation.optInt("startChapterIndex", Int.MIN_VALUE), "relations.startChapterIndex")
+            relation.optIntOrNull("endChapterIndex")?.let { checkIndex(it, "relations.endChapterIndex") }
+        }
+        root.optJSONArray("plotNodes").objects().forEach { node ->
+            checkIndex(node.optInt("startChapterIndex", Int.MIN_VALUE), "plotNodes.startChapterIndex")
+            node.optIntOrNull("endChapterIndex")?.let { checkIndex(it, "plotNodes.endChapterIndex") }
+        }
+    }
+
     suspend fun analyzeAll(bookId: String, onProgress: (AnalysisProgress) -> Unit = {}): AnalysisRunResult {
         val profile = settings.snapshot()
         return analyzeNextWithProfile(profile, bookId, Int.MAX_VALUE, onProgress)
@@ -168,7 +278,7 @@ class LlmStoryAnalyzer(
         existingNodes: List<PlotNodeEntity>,
         chapters: List<ChapterEntity>
     ): AnalysisDelta {
-        val jsonText = extractJsonObject(raw)
+        val jsonText = extractJsonObject(raw, REQUIRED_ANALYSIS_KEYS)
         val root = JSONObject(jsonText)
         val characters = root.optJSONArray("characters").objects().mapNotNull { item ->
             val name = item.optString("name").trim()
@@ -299,6 +409,7 @@ class LlmStoryAnalyzer(
 
     companion object {
         private const val ANALYSIS_VERSION = 1
+        private val REQUIRED_ANALYSIS_KEYS = setOf("characters", "relations", "plotNodes")
         private val SYSTEM_PROMPT = """
             你是“章境”小说知识图谱分析器。只依据提供的原文，不补写、不剧透。
             统一角色真名与别名；关系必须有方向、章节范围、原文证据和置信度。
@@ -307,8 +418,10 @@ class LlmStoryAnalyzer(
             {
               "characters":[{"name":"标准名","aliases":["别名"],"gender":"UNKNOWN","personality":"简述","firstChapterIndex":0,"lastChapterIndex":0,"confidence":0.8,"importanceScore":0.8,"importanceReason":"主线参与度与叙事作用","chapterMentions":[{"chapterIndex":0,"evidence":"原文短证据","confidence":0.8}]}],
               "relations":[{"from":"标准名","to":"标准名","type":"PROTECTS|FRIEND|ENEMY|FAMILY|MENTOR|LOVES|ALLY|USES|BETRAYS|RELATED_TO","strength":0.8,"startChapterIndex":0,"endChapterIndex":null,"evidence":"原文短证据","confidence":0.8}],
-              "plotNodes":[{"title":"事件名","summary":"摘要","startChapterIndex":0,"endChapterIndex":null,"parentTitles":[],"participants":["角色标准名"],"location":"地点或空字符串","confidence":0.8}]
+              "plotNodes":[{"title":"事件名","summary":"摘要","startChapterIndex":0,"endChapterIndex":null,"parentTitles":[],"participants":["角色标准名"],"location":"地点或空字符串","confidence":0.8}],
+              "dialogues":[{"chapterIndex":0,"speaker":"角色标准名或空字符串","dialogue":"原文对白","sourceText":"包含对白及说话人证据的连续原文","speakerEvidence":"原文证据","confidence":0.8}]
             }
+            对白要求：dialogue 与 sourceText 必须逐字来自原文；动作、情绪和状态短语（如“面露狐疑”）不能作为 speaker；不能确定时 speaker 置空。
         """.trimIndent()
     }
 

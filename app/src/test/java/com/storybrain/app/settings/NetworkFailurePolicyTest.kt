@@ -77,6 +77,23 @@ class NetworkFailurePolicyTest {
     }
 
     @Test
+    fun onlyExplicitResponseFormat400TriggersStructuredOutputFallback() {
+        val unsupported = NetworkFailureClassifier.classifyHttp(
+            400,
+            "{\"error\":{\"message\":\"unknown parameter response_format\"}}"
+        )
+        val badModel = NetworkFailureClassifier.classifyHttp(
+            400,
+            "{\"error\":{\"message\":\"model does not exist\"}}"
+        )
+
+        assertTrue(NetworkFailureClassifier.responseFormatUnsupported(unsupported))
+        assertFalse(NetworkFailureClassifier.responseFormatUnsupported(badModel))
+        assertEquals("unknown parameter response_format", unsupported.providerMessage)
+        assertFalse(unsupported.message.contains("unknown parameter"))
+    }
+
+    @Test
     fun retryPolicyIsBoundedAndDoesNotRetrySuccessfulAttempt() {
         assertFalse(RetryPolicy.shouldRetry(attempt = 1, failure = null))
         assertTrue(RetryPolicy.shouldRetry(attempt = 1, failure = NetworkFailureClassifier.classifyHttp(500, "")))
